@@ -17,7 +17,7 @@ class ENetCIFAR10(pl.LightningModule):
         super().__init__()
         self.config = config
         self.model = torch.hub.load('rwightman/gen-efficientnet-pytorch', 'efficientnet_b0', pretrained=True)
-        self.classifier = nn.Sequential(nn.Linear(1000, 10, bias=True), nn.Softmax())
+        self.model.classifier = nn.Sequential(nn.Linear(1280, 10, bias=True), nn.Softmax(dim=1))
         self.batch_size = config.batch_size
         self.learning_rate = config.lr
         self.train_acc = pl.metrics.Accuracy()
@@ -28,13 +28,16 @@ class ENetCIFAR10(pl.LightningModule):
         return self.model(x)
 
     def configure_optimizers(self):
-            return torch.optim.Adam(self.classifier.parameters(), lr=self.learning_rate)
+        # get all the parameters that are not the classifier
+        not_classifer = [param for name, param in filter(lambda key: 'classifier' not in key[0], self.model.named_parameters())]
+        return torch.optim.Adam([
+            {"params": self.model.classifier.parameters(), "lr": self.learning_rate},
+            {"params": not_classifer, "lr": self.learning_rate/10.0}
+        ])
 
     def training_step(self, batch, batch_idx):
         x, labels = batch
-        with torch.no_grad():
-            hidden = self.model(x)
-        predictions = self.classifier(hidden)
+        predictions = self.model(x)
         loss = cross_entropy(predictions, labels)
 
         self.train_acc(predictions, labels)
@@ -44,7 +47,7 @@ class ENetCIFAR10(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, labels = batch
-        y = self.classifier(self.model(x))
+        y = self.model(x)
         predictions = torch.argmax(y, dim=1)
         self.valid_acc(predictions, labels)
         self.log('valid/acc', self.valid_acc, on_step=False, on_epoch=True)
@@ -60,7 +63,7 @@ class ENetCIFAR10(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         x, labels = batch
-        y = self.classifier(self.model(x))
+        y = self.model(x)
         predictions = torch.argmax(y, dim=1)
         self.test_acc(predictions, labels)
         self.log('test/acc', self.test_acc, on_step=False, on_epoch=True)
