@@ -16,7 +16,6 @@ class ENetCIFAR10(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        #self.model = torch.hub.load('rwightman/gen-efficientnet-pytorch', 'efficientnet_b0', pretrained=True)
         self.model = torch.hub.load('rwightman/gen-efficientnet-pytorch', config.model, pretrained=True)
         class_in_features = self.model.classifier.in_features
         self.model.classifier = nn.Sequential(nn.Linear(class_in_features, 10, bias=True), nn.Softmax(dim=1))
@@ -97,10 +96,6 @@ class CIFAR10DataModule(pl.LightningDataModule):
         self.testset = torchvision.datasets.CIFAR10(
             root='~/data', train=False, download=True, transform=transform_test)
 
-        if self.config.dev:
-            self.trainset = Subset(self.trainset, list(range(1000)))
-            self.testset = Subset(self.testset, list(range(1000)))
-
     def train_dataloader(self):
         return DataLoader(self.trainset, batch_size=self.config.batch_size, shuffle=True, pin_memory=True,
                           num_workers=config.workers)
@@ -119,7 +114,6 @@ if __name__ == '__main__':
     args.add_argument('--batch_size', type=int, default=128)
     args.add_argument('--workers', type=int, default=2)
     args.add_argument('--lars', action='store_true', default=False)
-    args.add_argument('--dev', action='store_true', default=False)
     args.add_argument('--device', type=str)
     args.add_argument('--seed', type=int)
     args.add_argument('--lr', type=float, default=1e-4)
