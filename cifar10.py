@@ -123,6 +123,7 @@ if __name__ == '__main__':
 
     wandb_logger = WandbLogger(project="efficientnet-cifar10", config=config)
     trainer = pl.Trainer.from_argparse_args(config)
+    trainer.logger = wandb_logger
     dm = CIFAR10DataModule(config)
     trainer.fit(model=model, datamodule=dm)
     trainer.test(model=model, datamodule=dm)
