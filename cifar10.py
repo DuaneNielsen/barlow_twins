@@ -39,13 +39,15 @@ class ENetCIFAR10(pl.LightningModule):
 
         self.train_acc(predictions, labels)
         self.log('train/loss', loss, on_step=False, on_epoch=True)
-        self.log('train/acc', self.test_acc, on_step=False, on_epoch=True)
+        self.log('train/acc', self.train_acc, on_step=False, on_epoch=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
         x, labels = batch
         y = self.classifier(self.model(x))
         predictions = torch.argmax(y, dim=1)
+        self.valid_acc(predictions, labels)
+        self.log('valid/acc', self.valid_acc, on_step=False, on_epoch=True)
         return {'predictions': predictions, 'labels': labels}
 
     def validation_epoch_end(self, outputs):
@@ -60,13 +62,8 @@ class ENetCIFAR10(pl.LightningModule):
         x, labels = batch
         y = self.classifier(self.model(x))
         predictions = torch.argmax(y, dim=1)
+        self.test_acc(predictions, labels)
         return {'predictions': predictions, 'labels': labels}
-
-    def test_epoch_end(self, outputs):
-        preds = torch.cat([tmp['predictions'] for tmp in outputs])
-        targets = torch.cat([tmp['labels'] for tmp in outputs])
-        confusion = confusion_matrix(preds, targets, num_classes=10)
-        print(confusion)
 
 
 class CIFAR10DataModule(pl.LightningDataModule):
