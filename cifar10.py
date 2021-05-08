@@ -16,8 +16,10 @@ class ENetCIFAR10(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.model = torch.hub.load('rwightman/gen-efficientnet-pytorch', 'efficientnet_b0', pretrained=True)
-        self.model.classifier = nn.Sequential(nn.Linear(1280, 10, bias=True), nn.Softmax(dim=1))
+        #self.model = torch.hub.load('rwightman/gen-efficientnet-pytorch', 'efficientnet_b0', pretrained=True)
+        self.model = torch.hub.load('rwightman/gen-efficientnet-pytorch', config.model, pretrained=True)
+        class_in_features = self.model.classifier.in_features
+        self.model.classifier = nn.Sequential(nn.Linear(class_in_features, 10, bias=True), nn.Softmax(dim=1))
         self.batch_size = config.batch_size
         self.learning_rate = config.lr
         self.train_acc = pl.metrics.Accuracy()
@@ -112,7 +114,8 @@ class CIFAR10DataModule(pl.LightningDataModule):
 
 if __name__ == '__main__':
     args = ArgumentParser()
-    args.add_argument('--epochs', type=int, default=100)
+    pl.Trainer.add_argparse_args(args)
+    args.add_argument('--model', type=str, default='efficientnet_b0')
     args.add_argument('--batch_size', type=int, default=128)
     args.add_argument('--workers', type=int, default=2)
     args.add_argument('--lars', action='store_true', default=False)
@@ -125,7 +128,7 @@ if __name__ == '__main__':
     model = ENetCIFAR10(config)
 
     wandb_logger = WandbLogger(project="efficientnet-cifar10", config=config)
-    trainer = pl.Trainer(gpus=1, check_val_every_n_epoch=1, logger=wandb_logger)
+    trainer = pl.Trainer.from_argparse_args(config)
     dm = CIFAR10DataModule(config)
     trainer.fit(model=model, datamodule=dm)
     trainer.test(model=model, datamodule=dm)
