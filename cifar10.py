@@ -63,6 +63,7 @@ class ENetCIFAR10(pl.LightningModule):
         y = self.classifier(self.model(x))
         predictions = torch.argmax(y, dim=1)
         self.test_acc(predictions, labels)
+        self.log('test/acc', self.test_acc, on_step=False, on_epoch=True)
         return {'predictions': predictions, 'labels': labels}
 
 
