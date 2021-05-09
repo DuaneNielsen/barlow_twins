@@ -10,13 +10,65 @@ from torch.nn.functional import cross_entropy
 from typing import Optional
 import wandb
 from pytorch_lightning.loggers import WandbLogger
+from torch.nn.functional import upsample_bilinear
+
+
+class AtariVision(nn.Module):
+    def __init__(self, feature_size=512):
+        super().__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.SELU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2))
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.SELU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2))
+        self.conv2[0].weight.data.mul_(2 ** -0.5)
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.SELU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2))
+        self.conv3[0].weight.data.mul_(3 ** -0.5)
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.SELU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2))
+        self.conv4[0].weight.data.mul_(4 ** -0.5)
+        self.conv5 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.SELU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2))
+        self.conv5[0].weight.data.mul_(5 ** -0.5)
+        self.conv6 = nn.Sequential(
+            nn.Conv2d(256, feature_size, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.SELU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2))
+        self.conv6[0].weight.data.mul_(6 ** -0.5)
+
+        self.bias = nn.ParameterList([nn.Parameter(torch.zeros(1)) for _ in range(5)])
+
+        self.classifier = nn.Linear(feature_size, 10, bias=True)
+
+    def forward(self, state):
+        state = upsample_bilinear(state, (88, 88))
+        l1 = self.conv1(state)
+        l2 = self.conv2(l1) + self.bias[0]
+        l3 = self.conv3(l2) + self.bias[1]
+        l4 = self.conv4(l3) + self.bias[2]
+        l5 = self.conv5(l4) + self.bias[3]
+        l6 = self.conv6(l5) + self.bias[4]
+        return torch.softmax(self.classifier(l6.flatten(start_dim=1)), dim=1)
 
 
 class ENetCIFAR10(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.model = torch.hub.load('rwightman/gen-efficientnet-pytorch', config.model, pretrained=True)
+        if 'atari' in config.model:
+            self.model = AtariVision(feature_size=512)
+        else:
+            self.model = torch.hub.load('rwightman/gen-efficientnet-pytorch', config.model, pretrained=True)
         class_in_features = self.model.classifier.in_features
         self.model.classifier = nn.Sequential(nn.Linear(class_in_features, 10, bias=True), nn.Softmax(dim=1))
         self.batch_size = config.batch_size
@@ -114,7 +166,6 @@ if __name__ == '__main__':
     args.add_argument('--batch_size', type=int, default=128)
     args.add_argument('--workers', type=int, default=2)
     args.add_argument('--lars', action='store_true', default=False)
-    args.add_argument('--device', type=str)
     args.add_argument('--seed', type=int)
     args.add_argument('--lr', type=float, default=1e-4)
     config = args.parse_args()
