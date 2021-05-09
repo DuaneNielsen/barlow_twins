@@ -4,13 +4,15 @@ from argparse import ArgumentParser
 
 import pytorch_lightning as pl
 from pytorch_lightning import seed_everything
-from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
+from typing import Dict, Any
+from pl_bolts.callbacks.ssl_online import SSLOnlineEvaluator
+from pl_bolts.datamodules import CIFAR10DataModule, ImagenetDataModule, STL10DataModule
+from pl_bolts.models.self_supervised.simclr import SimCLREvalDataTransform, SimCLRTrainDataTransform
+from pytorch_lightning.loggers.wandb import WandbLogger
 
 
 if __name__ == '__main__':
-    from pl_bolts.callbacks.ssl_online import SSLOnlineEvaluator
-    from pl_bolts.datamodules import CIFAR10DataModule, ImagenetDataModule, STL10DataModule
-    from pl_bolts.models.self_supervised.simclr import SimCLREvalDataTransform, SimCLRTrainDataTransform
 
     seed_everything(1234)
 
@@ -52,10 +54,10 @@ if __name__ == '__main__':
 
     model = BYOL(**args.__dict__)
 
-    wandb_logger = WandbLogger(project="byol", log_model=False)
+    wandb_logger = WandbLogger(project="byol",  save_dir='.', log_model=False)
     # finetune in real-time
-    #online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes)
-
-    trainer = pl.Trainer.from_argparse_args(args, max_steps=300000)
+    online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes)
+    # DEFAULTS used by the Trainer
+    trainer = pl.Trainer.from_argparse_args(args, max_steps=300000, callbacks=[online_eval])
     trainer.logger = wandb_logger
     trainer.fit(model, datamodule=dm)
