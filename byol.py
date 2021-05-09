@@ -52,7 +52,7 @@ if __name__ == '__main__':
 
     model = BYOL(**args.__dict__)
 
-    wandb_logger = WandbLogger(project="byol", config=args)
+    wandb_logger = WandbLogger(project="byol", log_model=False)
     # finetune in real-time
     #online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes)
 
