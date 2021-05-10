@@ -21,7 +21,7 @@ from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 
 
 class AtariVision(nn.Module):
-    def __init__(self, feature_size=256):
+    def __init__(self):
         super().__init__()
         self.conv_stem = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False),
