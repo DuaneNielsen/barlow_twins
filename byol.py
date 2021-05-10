@@ -14,10 +14,57 @@ import torch.nn as nn
 import torch.hub
 from torch.nn import functional as F
 from torch.optim import Adam
+from torchvision.transforms import Compose, Resize
+
 
 from pl_bolts.callbacks.byol_updates import BYOLMAWeightUpdate
-from pl_bolts.models.self_supervised.byol.models import SiameseArm
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
+from pl_bolts.utils.self_supervised import torchvision_ssl_encoder
+
+
+class FixNineYearOldCodersJunk(nn.Module):
+    def __init__(self, dunce_net):
+        super().__init__()
+        self.dunce_net = dunce_net
+
+    def forward(self, x):
+        return self.dunce_net(x)[0]
+
+
+class MLP(nn.Module):
+
+    def __init__(self, input_dim=2048, hidden_size=4096, output_dim=256):
+        super().__init__()
+        self.output_dim = output_dim
+        self.input_dim = input_dim
+        self.model = nn.Sequential(
+            nn.Linear(input_dim, hidden_size, bias=False),
+            nn.BatchNorm1d(hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, output_dim, bias=True),
+        )
+
+    def forward(self, x):
+        x = self.model(x)
+        return x
+
+
+class SiameseArm(nn.Module):
+
+    def __init__(self, encoder=None):
+        super().__init__()
+
+        self.encoder = encoder
+        # Projector
+        self.projector = MLP()
+        # Predictor
+        self.predictor = MLP(input_dim=256)
+
+    def forward(self, x):
+        y = self.encoder(x)
+        z = self.projector(y)
+        h = self.predictor(z)
+        return y, z, h
 
 
 class AtariVision(nn.Module):
@@ -56,14 +103,13 @@ class AtariVision(nn.Module):
         self.bias = nn.ParameterList([nn.Parameter(torch.zeros(1)) for _ in range(5)])
 
     def forward(self, state):
-        state = F.upsample_bilinear(state, (88, 88))
         l1 = self.conv_stem(state)
         l2 = self.conv2(l1) + self.bias[0]
         l3 = self.conv3(l2) + self.bias[1]
         l4 = self.conv4(l3) + self.bias[2]
         l5 = self.conv5(l4) + self.bias[3]
         l6 = self.conv6(l5) + self.bias[4]
-        return l6.flatten(start_dim=1), None
+        return l6.flatten(start_dim=1)
 
 
 class BYOL(pl.LightningModule):
@@ -203,7 +249,8 @@ class BYOL(pl.LightningModule):
     def add_model_specific_args(parent_parser):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
         parser.add_argument('--online_ft', action='store_true', help='run online finetuner')
-        parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10', 'imagenet2012', 'stl10'])
+        parser.add_argument('--dataset', type=str, default='cifar10',
+                            choices=['cifar10', 'cifar10_upsampled', 'imagenet2012', 'stl10'])
 
         (args, _) = parser.parse_known_args()
 
@@ -238,6 +285,7 @@ if __name__ == '__main__':
 
     # model args
     parser = BYOL.add_model_specific_args(parser)
+    parser.add_argument('--input_size', type=int, default=32)
     args = parser.parse_args()
 
     # pick data
@@ -246,8 +294,8 @@ if __name__ == '__main__':
     # init default datamodule
     if args.dataset == 'cifar10':
         dm = CIFAR10DataModule.from_argparse_args(args)
-        dm.train_transforms = SimCLRTrainDataTransform(32)
-        dm.val_transforms = SimCLREvalDataTransform(32)
+        dm.train_transforms = SimCLRTrainDataTransform(args.input_size)
+        dm.val_transforms = SimCLREvalDataTransform(args.input_size)
         args.num_classes = dm.num_classes
 
     elif args.dataset == 'stl10':
@@ -270,12 +318,15 @@ if __name__ == '__main__':
     encoder = None
     if args.vision_model == 'atari':
         encoder = AtariVision()
-    if args.vision_model == 'resnet-50':
-        encoder = None
-    if args.vision_model_from_pytorch_hub is not None:
-        # this wont work, conv-stem and classifier need to be hooked up correctly to the SiameseArm and dataset
-        repo, model = args.vision_model_from_pytorch_hub
-        encoder = torch.hub.load(repo_or_dir=repo, model=model, pretrained=args.pretrained)
+    elif args.vision_model == 'resnet-50':
+        encoder = torchvision_ssl_encoder('resnet50')
+        encoder = FixNineYearOldCodersJunk(encoder)
+    else:
+        encoder = torch.hub.load(repo_or_dir='rwightman/gen-efficientnet-pytorch', model=args.vision_model, pretrained=args.pretrained)
+        if encoder.classifier.in_features == 2048:
+            encoder.classifier = nn.Identity()
+        else:
+            encoder.classifier = nn.Linear(encoder.classifier.in_features, 2048, bias=False)
 
     model = BYOL(encoder=encoder, **args.__dict__)
 
