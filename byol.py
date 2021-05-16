@@ -15,11 +15,21 @@ import torch.hub
 from torch.nn import functional as F
 from torch.optim import Adam
 from torchvision.transforms import Compose, Resize
-
+from pathlib import Path
 
 from pl_bolts.callbacks.byol_updates import BYOLMAWeightUpdate
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from pl_bolts.utils.self_supervised import torchvision_ssl_encoder
+from rl import OnDiskReplayBuffer
+from torch.utils.data import random_split
+import random
+import itertools
+import torchvision.transforms
+import numpy as np
+from math import ceil, floor
+from rich.progress import track
+import os
+import tables as tb
 
 
 class FixNineYearOldCodersJunk(nn.Module):
@@ -250,13 +260,15 @@ class BYOL(pl.LightningModule):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
         parser.add_argument('--online_ft', action='store_true', help='run online finetuner')
         parser.add_argument('--dataset', type=str, default='cifar10',
-                            choices=['cifar10', 'cifar10_upsampled', 'imagenet2012', 'stl10'])
+                            choices=['cifar10', 'cifar10_upsampled', 'imagenet2012', 'stl10', 'atari'])
 
         (args, _) = parser.parse_known_args()
 
         # Data
         parser.add_argument('--data_dir', type=str, default='.')
         parser.add_argument('--num_workers', default=8, type=int)
+        parser.add_argument('--filename', type=str)
+
 
         # optim
         parser.add_argument('--batch_size', type=int, default=256)
@@ -315,6 +327,109 @@ if __name__ == '__main__':
         dm.val_transforms = SimCLREvalDataTransform(h)
         args.num_classes = dm.num_classes
 
+    elif args.dataset == 'atari':
+
+        # class BalancedNextStateReward(OnDiskReplayBuffer, torch.utils.data.Dataset):
+        #     def __init__(self, transforms=None):
+        #         super().__init__()
+        #         self.transforms = transforms
+        #         self.reward = []
+        #         self.no_reward = []
+        #         for i, (s, a, s_p, r, d) in track(enumerate(buffer), total=len(buffer)):
+        #             if r > 0.0:
+        #                 self.reward += [i]
+        #             elif r == 0.0:
+        #                 self.no_reward += [i]
+        #         random.shuffle(self.no_reward)
+        #         assert len(self.no_reward) > len(self.reward), "More transitions positive reward than zero, re-think"
+        #         self.no_reward = self.no_reward[:len(self.reward)]
+        #         self.index = list(itertools.chain(*zip(self.reward, self.no_reward)))
+        #
+        #     def __len__(self):
+        #         return len(self.index)
+        #
+        #     def __getitem__(self, item):
+        #         i = self.index[item]
+        #         s, a, s_p, r, d = self.buffer[i]
+        #         if self.transforms:
+        #             s_p = self.transforms(s_p)
+        #         return s_p, np.array([1.0, 0]) if r == 0 else np.array([0, 1.0])
+
+
+        class NextStateReward(OnDiskReplayBuffer, torch.utils.data.Dataset):
+            def __init__(self, transforms):
+                super().__init__()
+                self.transforms = transforms
+
+            def make_transition(self, trans):
+                s_p = self.states[trans['next_state']]
+                s_p = self.transforms(s_p)
+                r = trans['reward']
+                r = 0 if r == 0 else 1
+                return s_p, r
+
+            @staticmethod
+            def load_splits(filename):
+                """
+                returns non overlapping random splits of the dataset
+                filename: the filename
+                :param lengths: list of lengths of each split, [10, 4, 3] 10 is length of split 0, etc...
+                :return: None
+                """
+                assert os.path.isfile(filename), f"{filename} does not exist"
+                fileh = tb.open_file(filename, mode='r')
+                length = len(fileh.root.replay.Transitions)
+                test_len = ceil(length/2)
+                val_len = floor(length/2)
+                indices = np.random.permutation(length)
+
+                train_transforms = torchvision.transforms.Compose([
+                    torchvision.transforms.ToPILImage(),
+                    torchvision.transforms.Resize(size=args.input_size),
+                    SimCLRTrainDataTransform(h)
+                ])
+                val_transforms = torchvision.transforms.Compose([
+                    torchvision.transforms.ToPILImage(),
+                    torchvision.transforms.Resize(size=args.input_size),
+                    SimCLREvalDataTransform(h)
+                ])
+
+                train_set = NextStateReward(train_transforms)
+                train_set.fileh = fileh
+                train_set.split = indices[0:test_len]
+
+                val_set = NextStateReward(val_transforms)
+                val_set.fileh = fileh
+
+                # create a balanced set of reward positive and no reward
+                val_set.split = indices[test_len:]
+                reward_pos, reward_zero = [], []
+                for i in val_set.split:
+                    reward = val_set.transitions[i]['reward']
+                    if reward == 0:
+                        reward_zero += [i]
+                    if reward > 0:
+                        reward_pos += [i]
+                reward_zero = reward_zero[:len(reward_pos)]
+                val_set.split = list(itertools.chain(*zip(reward_pos, reward_zero)))
+
+                return train_set, val_set
+
+        (h, w, c) = (219, 160, 3)
+
+        train_set, val_set = NextStateReward.load_splits(args.filename)
+
+        dm = pl.LightningDataModule.from_datasets(
+            train_dataset=train_set,
+            val_dataset=val_set,
+            test_dataset=None,
+            batch_size=args.batch_size,
+            num_workers=0
+        )
+
+        dm.num_classes = 2
+        args.num_classes = 2
+
     encoder = None
     if args.vision_model == 'atari':
         encoder = AtariVision()
@@ -330,7 +445,9 @@ if __name__ == '__main__':
 
     model = BYOL(encoder=encoder, **args.__dict__)
 
-    wandb_logger = WandbLogger(project="byol",  save_dir='.', log_model=False)
+    save_dir = f'./{args.vision_model}-{args.input_size}'
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
+    wandb_logger = WandbLogger(project="byol",  save_dir=save_dir, log_model=False)
     # finetune in real-time
     online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes)
     # DEFAULTS used by the Trainer
