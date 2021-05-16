@@ -329,33 +329,6 @@ if __name__ == '__main__':
 
     elif args.dataset == 'atari':
 
-        # class BalancedNextStateReward(OnDiskReplayBuffer, torch.utils.data.Dataset):
-        #     def __init__(self, transforms=None):
-        #         super().__init__()
-        #         self.transforms = transforms
-        #         self.reward = []
-        #         self.no_reward = []
-        #         for i, (s, a, s_p, r, d) in track(enumerate(buffer), total=len(buffer)):
-        #             if r > 0.0:
-        #                 self.reward += [i]
-        #             elif r == 0.0:
-        #                 self.no_reward += [i]
-        #         random.shuffle(self.no_reward)
-        #         assert len(self.no_reward) > len(self.reward), "More transitions positive reward than zero, re-think"
-        #         self.no_reward = self.no_reward[:len(self.reward)]
-        #         self.index = list(itertools.chain(*zip(self.reward, self.no_reward)))
-        #
-        #     def __len__(self):
-        #         return len(self.index)
-        #
-        #     def __getitem__(self, item):
-        #         i = self.index[item]
-        #         s, a, s_p, r, d = self.buffer[i]
-        #         if self.transforms:
-        #             s_p = self.transforms(s_p)
-        #         return s_p, np.array([1.0, 0]) if r == 0 else np.array([0, 1.0])
-
-
         class NextStateReward(OnDiskReplayBuffer, torch.utils.data.Dataset):
             def __init__(self, transforms):
                 super().__init__()
