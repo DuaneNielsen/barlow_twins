@@ -30,6 +30,9 @@ from math import ceil, floor
 from rich.progress import track
 import os
 import tables as tb
+from typing import *
+from sampler import SamplerFactory
+from torch.utils.data import DataLoader, Dataset
 
 
 class FixNineYearOldCodersJunk(nn.Module):
@@ -172,17 +175,17 @@ class BYOL(pl.LightningModule):
     """
 
     def __init__(
-        self,
-        num_classes,
-        learning_rate: float = 0.2,
-        weight_decay: float = 1.5e-6,
-        input_height: int = 32,
-        batch_size: int = 32,
-        num_workers: int = 0,
-        warmup_epochs: int = 10,
-        max_epochs: int = 1000,
-        encoder: nn.Module = None,
-        **kwargs
+            self,
+            num_classes,
+            learning_rate: float = 0.2,
+            weight_decay: float = 1.5e-6,
+            input_height: int = 32,
+            batch_size: int = 32,
+            num_workers: int = 0,
+            warmup_epochs: int = 10,
+            max_epochs: int = 1000,
+            encoder: nn.Module = None,
+            **kwargs
     ):
         """
         Args:
@@ -269,7 +272,6 @@ class BYOL(pl.LightningModule):
         parser.add_argument('--num_workers', default=8, type=int)
         parser.add_argument('--filename', type=str)
 
-
         # optim
         parser.add_argument('--batch_size', type=int, default=256)
         parser.add_argument('--learning_rate', type=float, default=1e-3)
@@ -329,10 +331,10 @@ if __name__ == '__main__':
 
     elif args.dataset == 'atari':
 
-        class NextStateReward(OnDiskReplayBuffer, torch.utils.data.Dataset):
-            def __init__(self, transforms):
+        class RefactoredNextStateReward(OnDiskReplayBuffer, torch.utils.data.Dataset):
+            def __init__(self):
                 super().__init__()
-                self.transforms = transforms
+                self.transforms = None
 
             def make_transition(self, trans):
                 s_p = self.states[trans['next_state']]
@@ -341,93 +343,203 @@ if __name__ == '__main__':
                 r = 0 if r == 0 else 1
                 return s_p, r
 
-            @staticmethod
-            def load_splits(filename):
-                """
-                returns non overlapping random splits of the dataset
-                filename: the filename
-                :param lengths: list of lengths of each split, [10, 4, 3] 10 is length of split 0, etc...
-                :return: None
-                """
-                assert os.path.isfile(filename), f"{filename} does not exist"
-                fileh = tb.open_file(filename, mode='r')
-                length = len(fileh.root.replay.Transitions)
-                test_len = ceil(length/2)
-                val_len = floor(length/2)
-                indices = np.random.permutation(length)
+            def get_positive_reward_index(self):
+                return self.transitions.get_where_list('reward > 0')
 
-                train_transforms = torchvision.transforms.Compose([
-                    torchvision.transforms.ToPILImage(),
-                    torchvision.transforms.Resize(size=(args.input_size, args.input_size)),
-                    SimCLRTrainDataTransform(args.input_size)
-                ])
-                val_transforms = torchvision.transforms.Compose([
-                    torchvision.transforms.ToPILImage(),
-                    torchvision.transforms.Resize(size=(args.input_size, args.input_size)),
-                    SimCLREvalDataTransform(args.input_size)
-                ])
+            def get_non_positive_reward_index(self):
+                return self.transitions.get_where_list('reward <= 0')
 
-                train_set = NextStateReward(train_transforms)
-                train_set.fileh = fileh
-                train_set.split = indices[0:test_len]
 
-                val_set = NextStateReward(val_transforms)
-                val_set.fileh = fileh
-                val_set.split = indices[test_len:]
+        class AtariDataModule(pl.LightningDataModule):
+            def __init__(self, filename, train_transforms, val_transforms, test_transforms,
+                         val_split: Union[int, float] = 0.2,
+                         num_workers: int = 0,
+                         normalize: bool = False,
+                         batch_size: int = 32,
+                         seed: int = 42,
+                         shuffle: bool = False,
+                         pin_memory: bool = False,
+                         drop_last: bool = False,
+                         ):
+                super().__init__(train_transforms, val_transforms, test_transforms)
+                self.filename = filename
+                self.buffer = None
+                self.train_set = None
+                self.val_set = None
+                self.val_split = val_split
+                self.num_workers = num_workers
+                self.normalize = normalize
+                self.batch_size = batch_size
+                self.seed = seed
+                self.shuffle = shuffle
+                self.pin_memory = pin_memory
+                self.drop_last = drop_last
+                self.val_sampler = None
+                self.train_sampler = None
 
-                def balanced_split(val_set):
-                    # create a balanced set of reward positive and no reward
-                    reward_pos, reward_zero = [], []
-                    for i in val_set.split:
-                        reward = val_set.transitions[i]['reward']
-                        if reward == 0:
-                            reward_zero += [i]
-                        if reward > 0:
-                            reward_pos += [i]
-                    reward_zero = reward_zero[:len(reward_pos)]
-                    return list(itertools.chain(*zip(reward_pos, reward_zero)))
+            def setup(self, stage: Optional[str] = None) -> None:
+                self.train_set = RefactoredNextStateReward().load(args.filename, print_stats=True)
+                self.train_set.transforms = self.train_transforms
+                self.val_set = RefactoredNextStateReward().load(args.filename)
+                self.val_set.transforms = self.val_transforms
 
-                train_set.split = balanced_split(train_set)
-                val_set.split = balanced_split(val_set)
-                # hack to test if the classification problem is solvable
-                #train_set.split = np.concatenate((train_set.split, np.array(reward_pos)))
+                rewards_pos = self.train_set.get_positive_reward_index()
+                rewards_nonpos = self.train_set.get_non_positive_reward_index()
 
-                return train_set, val_set
+                def split_index(index):
+                    return index[:ceil(len(index) * 0.8)], index[floor(len(index) * 0.8):]
 
-        train_set, val_set = NextStateReward.load_splits(args.filename)
+                train_rewards_pos, val_rewards_pos = split_index(rewards_pos)
+                train_rewards_nonpos, val_rewards_nonpos = split_index(rewards_nonpos)
+                self.train_sampler = SamplerFactory().get(
+                    class_idxs=[train_rewards_pos, train_rewards_nonpos],
+                    batch_size=args.batch_size,
+                    n_batches=1024,
+                    alpha=0.5,
+                    kind='fixed'
+                )
+                self.val_sampler = SamplerFactory().get(
+                    class_idxs=[train_rewards_pos, train_rewards_nonpos],
+                    batch_size=args.batch_size,
+                    n_batches=1024,
+                    alpha=0.5,
+                    kind='fixed'
+                )
 
-        dm = pl.LightningDataModule.from_datasets(
-            train_dataset=train_set,
-            val_dataset=val_set,
-            test_dataset=None,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers
-        )
+            def _data_loader(self, dataset: torch.utils.data.Dataset,
+                             batch_sampler,
+                             shuffle: bool = False) -> torch.utils.data.DataLoader:
+                return torch.utils.data.DataLoader(
+                    dataset,
+                    batch_sampler=batch_sampler,
+                    shuffle=shuffle,
+                    num_workers=self.num_workers,
+                    drop_last=self.drop_last,
+                    pin_memory=self.pin_memory
+                )
 
+            def train_dataloader(self, *args: Any, **kwargs: Any) -> DataLoader:
+                """ The train dataloader """
+                return self._data_loader(self.train_set, batch_sampler=self.train_sampler, shuffle=self.shuffle)
+
+            def val_dataloader(self, *args: Any, **kwargs: Any) -> Union[DataLoader, List[DataLoader]]:
+                """ The val dataloader """
+                return self._data_loader(self.val_set, batch_sampler=self.val_sampler, shuffle=self.shuffle)
+
+
+    # class NextStateReward(OnDiskReplayBuffer, torch.utils.data.Dataset):
+    #     def __init__(self, transforms):
+    #         super().__init__()
+    #         self.transforms = transforms
+    #
+    #     def make_transition(self, trans):
+    #         s_p = self.states[trans['next_state']]
+    #         s_p = self.transforms(s_p)
+    #         r = trans['reward']
+    #         r = 0 if r == 0 else 1
+    #         return s_p, r
+    #
+    #     @staticmethod
+    #     def load_splits(filename):
+    #         """
+    #         returns non overlapping random splits of the dataset
+    #         filename: the filename
+    #         :param lengths: list of lengths of each split, [10, 4, 3] 10 is length of split 0, etc...
+    #         :return: None
+    #         """
+    #         assert os.path.isfile(filename), f"{filename} does not exist"
+    #         fileh = tb.open_file(filename, mode='r')
+    #         length = len(fileh.root.replay.Transitions)
+    #         test_len = ceil(length / 2)
+    #         val_len = floor(length / 2)
+    #         indices = np.random.permutation(length)
+    #
+    #         train_transforms = torchvision.transforms.Compose([
+    #             torchvision.transforms.ToPILImage(),
+    #             torchvision.transforms.Resize(size=(args.input_size, args.input_size)),
+    #             SimCLRTrainDataTransform(args.input_size)
+    #         ])
+    #         val_transforms = torchvision.transforms.Compose([
+    #             torchvision.transforms.ToPILImage(),
+    #             torchvision.transforms.Resize(size=(args.input_size, args.input_size)),
+    #             SimCLREvalDataTransform(args.input_size)
+    #         ])
+    #
+    #         train_set = NextStateReward(train_transforms)
+    #         train_set.fileh = fileh
+    #         train_set.split = indices[0:test_len]
+    #
+    #         val_set = NextStateReward(val_transforms)
+    #         val_set.fileh = fileh
+    #         val_set.split = indices[test_len:]
+    #
+    #         def balanced_split(val_set):
+    #             # create a balanced set of reward positive and no reward
+    #             reward_pos, reward_zero = [], []
+    #             for i in track(val_set.split, description='[blue]balancing'):
+    #                 reward = val_set.transitions[i]['reward']
+    #                 if reward == 0:
+    #                     reward_zero += [i]
+    #                 if reward > 0:
+    #                     reward_pos += [i]
+    #             reward_zero = reward_zero[:len(reward_pos)]
+    #             return list(itertools.chain(*zip(reward_pos, reward_zero)))
+    #
+    #         train_set.split = balanced_split(train_set)
+    #         val_set.split = balanced_split(val_set)
+    #         # hack to test if the classification problem is solvable
+    #         # train_set.split = np.concatenate((train_set.split, np.array(reward_pos)))
+    #
+    #         return train_set, val_set
+    #
+    #
+    # train_set, val_set = NextStateReward.load_splits(args.filename)
+    #
+    # dm = pl.LightningDataModule.from_datasets(
+    #     train_dataset=train_set,
+    #     val_dataset=val_set,
+    #     test_dataset=None,
+    #     batch_size=args.batch_size,
+    #     num_workers=args.num_workers
+    # )
+
+        train_transforms = torchvision.transforms.Compose([
+            torchvision.transforms.ToPILImage(),
+            torchvision.transforms.Resize(size=(args.input_size, args.input_size)),
+            SimCLRTrainDataTransform(args.input_size)
+        ])
+        val_transforms = torchvision.transforms.Compose([
+            torchvision.transforms.ToPILImage(),
+            torchvision.transforms.Resize(size=(args.input_size, args.input_size)),
+            SimCLREvalDataTransform(args.input_size)
+        ])
+
+        dm = AtariDataModule(args.filename, train_transforms, val_transforms, None)
         dm.num_classes = 2
         args.num_classes = 2
 
-    encoder = None
-    if args.vision_model == 'atari':
-        encoder = AtariVision()
-    elif args.vision_model == 'resnet-50':
-        encoder = torchvision_ssl_encoder('resnet50')
-        encoder = FixNineYearOldCodersJunk(encoder)
+encoder = None
+if args.vision_model == 'atari':
+    encoder = AtariVision()
+elif args.vision_model == 'resnet-50':
+    encoder = torchvision_ssl_encoder('resnet50')
+    encoder = FixNineYearOldCodersJunk(encoder)
+else:
+    encoder = torch.hub.load(repo_or_dir='rwightman/gen-efficientnet-pytorch', model=args.vision_model,
+                             pretrained=args.pretrained)
+    if encoder.classifier.in_features == 2048:
+        encoder.classifier = nn.Identity()
     else:
-        encoder = torch.hub.load(repo_or_dir='rwightman/gen-efficientnet-pytorch', model=args.vision_model, pretrained=args.pretrained)
-        if encoder.classifier.in_features == 2048:
-            encoder.classifier = nn.Identity()
-        else:
-            encoder.classifier = nn.Linear(encoder.classifier.in_features, 2048, bias=False)
+        encoder.classifier = nn.Linear(encoder.classifier.in_features, 2048, bias=False)
 
-    model = BYOL(encoder=encoder, **args.__dict__)
+model = BYOL(encoder=encoder, **args.__dict__)
 
-    save_dir = f'./{args.vision_model}-{args.input_size}'
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
-    wandb_logger = WandbLogger(project=f"byol-{args.dataset}-breakout",  save_dir=save_dir, log_model=False)
-    # finetune in real-time
-    online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes)
-    # DEFAULTS used by the Trainer
-    trainer = pl.Trainer.from_argparse_args(args, max_steps=300000, callbacks=[online_eval])
-    trainer.logger = wandb_logger
-    trainer.fit(model, datamodule=dm)
+save_dir = f'./{args.vision_model}-{args.input_size}'
+Path(save_dir).mkdir(parents=True, exist_ok=True)
+wandb_logger = WandbLogger(project=f"byol-{args.dataset}-breakout", save_dir=save_dir, log_model=False)
+# finetune in real-time
+online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes)
+# DEFAULTS used by the Trainer
+trainer = pl.Trainer.from_argparse_args(args, max_steps=300000, callbacks=[online_eval])
+trainer.logger = wandb_logger
+trainer.fit(model, datamodule=dm)

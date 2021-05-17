@@ -8,6 +8,8 @@ import warnings
 from logs import logger, list_stats
 import tables as tb
 import os
+import rich.table
+from rich import print
 
 global_step = 0
 global_best_mean_return = -999999999.0
@@ -365,11 +367,14 @@ class OnDiskStateRef:
 
 
 class OnDiskStateBuffer:
-    def __init__(self, buffer):
-        self.buffer = buffer
+    def __init__(self):
+        self.fileh = None
 
-    @staticmethod
-    def create(fileh, expectedrows, shape, dtype, complevel):
+    def load(self, fileh):
+        self.fileh = fileh
+        return self
+
+    def create(self, fileh, expectedrows, shape, dtype, complevel):
         """
 
         Args:
@@ -379,24 +384,26 @@ class OnDiskStateBuffer:
         Returns:
 
         """
+        self.fileh = fileh
         _shape = (0, *shape)
         atom = tb.Atom.from_dtype(np.dtype(dtype))
         filters = tb.Filters(complevel=complevel, complib='zlib')
-        fileh.create_earray('/replay', name='States', atom=atom, shape=_shape,
+        self.fileh.create_earray('/replay', name='States', atom=atom, shape=_shape,
                                  title="replay: States", filters=filters, expectedrows=expectedrows)
+        return self
 
     def append(self, state):
-        expected_shape = self.buffer.fileh.root.replay.States.shape[1:]
+        expected_shape = self.fileh.root.replay.States.shape[1:]
         assert state.shape == expected_shape, f"expected shape {expected_shape} but state has {state.shape}"
         state = state[np.newaxis, ...]
-        self.buffer.fileh.root.replay.States.append(state)
-        return StateRef(self, len(self.buffer.fileh.root.replay.States) - 1)
+        self.fileh.root.replay.States.append(state)
+        return StateRef(self, len(self.fileh.root.replay.States) - 1)
 
     def __getitem__(self, item):
-        return self.buffer.fileh.root.replay.States[item]
+        return self.fileh.root.replay.States[item]
 
     def __len__(self):
-        return len(self.buffer.fileh.root.replay.States)
+        return len(self.fileh.root.replay.States)
 
 
 class Transition(tb.IsDescription):
@@ -415,21 +422,35 @@ class Episode(tb.IsDescription):
 
 
 class Episodes:
-    def __init__(self, buffer):
-        self.buffer = buffer
+    def __init__(self):
+        self.fileh = None
+
+    def load(self, fileh):
+        self.fileh = fileh
+
+    def create(self, fileh, expectedrows):
+        self.fileh = fileh
+        self.fileh.create_table("/replay", "Episodes", Episode, "replay: Episodes", expectedrows=expectedrows)
+        return self
 
     def __getitem__(self, item):
-        return slice(*self.buffer.fileh.root.replay.Episodes[item])
+        return slice(*self.fileh.root.replay.Episodes[item])
 
     def __len__(self):
-        return len(self.buffer.fileh.root.replay.Episodes)
+        return len(self.fileh.root.replay.Episodes)
 
 
 class OnDiskReplayBuffer:
     def __init__(self):
+        """
+        Does not support multiple workers, re-implement in h5py?
+        Args:
+            buffer:
+        """
+
         self.fileh = None
-        self.statebuffer = OnDiskStateBuffer(self)
-        self.episodes = Episodes(self)
+        self.statebuffer = OnDiskStateBuffer()
+        self.episodes = Episodes()
         self.prev_done = True
         self.split = None
 
@@ -441,12 +462,28 @@ class OnDiskReplayBuffer:
     def states(self):
         return self.fileh.root.replay.States
 
-    @staticmethod
-    def load(filename):
+    def load(self, filename, print_stats=False):
         assert os.path.isfile(filename), f"{filename} does not exist"
-        buffer = OnDiskReplayBuffer()
-        buffer.fileh = tb.open_file(filename, mode='a')
-        return buffer
+        self.fileh = tb.open_file(filename, mode='a')
+        self.statebuffer.fileh = self.fileh
+        self.episodes.fileh = self.fileh
+        if print_stats:
+            self.print_stats()
+        return self
+
+    def print_stats(self):
+        table = rich.table.Table(title=f"{self.__class__.__name__}")
+        table.add_column("Stat", justify="right", style="cyan", no_wrap=True)
+        table.add_column("Title", style="magenta")
+        table.add_row("File", f'{self.fileh.filename}')
+        table.add_row("Episodes", f"{len(self.episodes)}")
+        epi_lengths = [(end - start).item() for start, end in self.fileh.root.replay.Episodes[:]]
+        table.add_row("Mean episode len", f"{mean(epi_lengths)}")
+        table.add_row("Transitions", f"{len(self)}")
+        table.add_row("Transitions with + reward", f"{len(self.transitions.get_where_list('reward > 0'))}")
+        table.add_row("Transitions with - reward", f"{len(self.transitions.get_where_list('reward < 0'))}")
+        table.add_row("Transitions with 0 reward", f"{len(self.transitions.get_where_list('reward == 0'))}")
+        print(table)
 
     @staticmethod
     def load_random_splits(filename, lengths):
@@ -481,8 +518,7 @@ class OnDiskReplayBuffer:
         """
         raise NotImplementedError
 
-    @staticmethod
-    def create(filename, state_shape, state_dtype, expectedrows=1000000, state_complevel=5):
+    def create(self, filename, state_shape, state_dtype, expectedrows=1000000, state_complevel=5):
         """
 
         Args:
@@ -496,14 +532,12 @@ class OnDiskReplayBuffer:
 
         """
         assert not os.path.isfile(filename), f"{filename} already exists"
-        buffer = OnDiskReplayBuffer()
-        fileh = tb.open_file(filename, mode='w')
-        buffer.fileh = fileh
-        fileh.create_group(fileh.root, "replay")
-        fileh.create_table("/replay", "Transitions", Transition, "replay: Transitions", expectedrows=expectedrows)
-        fileh.create_table("/replay", "Episodes", Episode, "replay: Episodes", expectedrows=expectedrows)
-        OnDiskStateBuffer.create(fileh, expectedrows, state_shape, state_dtype, state_complevel)
-        return buffer
+        self.fileh = tb.open_file(filename, mode='w')
+        self.fileh.create_group(self.fileh.root, "replay")
+        self.fileh.create_table("/replay", "Transitions", Transition, "replay: Transitions", expectedrows=expectedrows)
+        self.episodes.create(self.fileh, expectedrows)
+        self.statebuffer.create(self.fileh, expectedrows, state_shape, state_dtype, state_complevel)
+        return self
 
     def close(self):
         self.fileh.close()
