@@ -358,13 +358,13 @@ if __name__ == '__main__':
 
                 train_transforms = torchvision.transforms.Compose([
                     torchvision.transforms.ToPILImage(),
-                    torchvision.transforms.Resize(size=args.input_size),
-                    SimCLRTrainDataTransform(h)
+                    torchvision.transforms.Resize(size=(args.input_size, args.input_size)),
+                    SimCLRTrainDataTransform(args.input_size)
                 ])
                 val_transforms = torchvision.transforms.Compose([
                     torchvision.transforms.ToPILImage(),
-                    torchvision.transforms.Resize(size=args.input_size),
-                    SimCLREvalDataTransform(h)
+                    torchvision.transforms.Resize(size=(args.input_size, args.input_size)),
+                    SimCLREvalDataTransform(args.input_size)
                 ])
 
                 train_set = NextStateReward(train_transforms)
@@ -388,8 +388,6 @@ if __name__ == '__main__':
 
                 return train_set, val_set
 
-        (h, w, c) = (219, 160, 3)
-
         train_set, val_set = NextStateReward.load_splits(args.filename)
 
         dm = pl.LightningDataModule.from_datasets(
@@ -397,7 +395,7 @@ if __name__ == '__main__':
             val_dataset=val_set,
             test_dataset=None,
             batch_size=args.batch_size,
-            num_workers=0
+            num_workers=args.num_workers
         )
 
         dm.num_classes = 2
@@ -420,7 +418,7 @@ if __name__ == '__main__':
 
     save_dir = f'./{args.vision_model}-{args.input_size}'
     Path(save_dir).mkdir(parents=True, exist_ok=True)
-    wandb_logger = WandbLogger(project="byol",  save_dir=save_dir, log_model=False)
+    wandb_logger = WandbLogger(project=f"byol-{args.dataset}-breakout",  save_dir=save_dir, log_model=False)
     # finetune in real-time
     online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes)
     # DEFAULTS used by the Trainer
