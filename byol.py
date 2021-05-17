@@ -386,6 +386,9 @@ if __name__ == '__main__':
                 reward_zero = reward_zero[:len(reward_pos)]
                 val_set.split = list(itertools.chain(*zip(reward_pos, reward_zero)))
 
+                # hack to test if the classification problem is solvable
+                train_set.split = np.concatenate((train_set.split, np.array(reward_pos)))
+
                 return train_set, val_set
 
         train_set, val_set = NextStateReward.load_splits(args.filename)
