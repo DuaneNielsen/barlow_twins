@@ -373,21 +373,24 @@ if __name__ == '__main__':
 
                 val_set = NextStateReward(val_transforms)
                 val_set.fileh = fileh
-
-                # create a balanced set of reward positive and no reward
                 val_set.split = indices[test_len:]
-                reward_pos, reward_zero = [], []
-                for i in val_set.split:
-                    reward = val_set.transitions[i]['reward']
-                    if reward == 0:
-                        reward_zero += [i]
-                    if reward > 0:
-                        reward_pos += [i]
-                reward_zero = reward_zero[:len(reward_pos)]
-                val_set.split = list(itertools.chain(*zip(reward_pos, reward_zero)))
 
+                def balanced_split(val_set):
+                    # create a balanced set of reward positive and no reward
+                    reward_pos, reward_zero = [], []
+                    for i in val_set.split:
+                        reward = val_set.transitions[i]['reward']
+                        if reward == 0:
+                            reward_zero += [i]
+                        if reward > 0:
+                            reward_pos += [i]
+                    reward_zero = reward_zero[:len(reward_pos)]
+                    return list(itertools.chain(*zip(reward_pos, reward_zero)))
+
+                train_set.split = balanced_split(train_set)
+                val_set.split = balanced_split(val_set)
                 # hack to test if the classification problem is solvable
-                train_set.split = np.concatenate((train_set.split, np.array(reward_pos)))
+                #train_set.split = np.concatenate((train_set.split, np.array(reward_pos)))
 
                 return train_set, val_set
 
