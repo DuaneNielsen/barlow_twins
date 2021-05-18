@@ -277,7 +277,12 @@ class BYOL(pl.LightningModule):
         parser.add_argument('--data_dir', type=str, default='.')
         parser.add_argument('--num_workers', default=8, type=int)
         parser.add_argument('--filename', type=str)
-        parser.add_argument('--rewards_class', type=str, default='monte_carlo')
+        reward_class_choices = ['monte_carlo', 'positive_reward', 'distance']
+        parser.add_argument('--reward_class', type=str, default='monte_carlo', choices=reward_class_choices)
+        parser.add_argument('--reward_causality_dist', type=int, default=5)
+        parser.add_argument('--reward_monte_carlo_discount', type=float, default=0.6)
+        parser.add_argument('--reward_threshold', type=float, default=0.5)
+
 
         # optim
         parser.add_argument('--batch_size', type=int, default=256)
@@ -352,21 +357,49 @@ if __name__ == '__main__':
             def load(self, filename, print_stats=False):
                 super().load(filename)
 
-                if args.rewards_class == 'monte_carlo':
-                    monte_carlo_values = self.compute_monte_carlo_values(discount=0.6)
+                if args.reward_class == 'monte_carlo':
+                    """
+                    Classify states with a discounted monte_carlo value greater than threshold as "good"
+                    """
+
+                    monte_carlo_values = self.compute_monte_carlo_values(discount=args.reward_monte_carlo_discount)
                     for i, v in enumerate(monte_carlo_values):
-                        if v < 0.2:
+                        if v < args.reward_threshold:
                             self.rewards_neg.append(i)
                             self.classes.append(self.REWARD_NEG)
                         else:
                             self.rewards_pos.append(i)
                             self.classes.append(self.REWARD_POS)
-                else:
+
+                elif args.reward_class == 'positive_reward':
+                    """
+                    Classify only states with positive reward as "good"
+                    """
                     self.rewards_pos = self.transitions.get_where_list('reward > 0')
                     self.rewards_neg = self.transitions.get_where_list('reward <= 0')
                     self.classes = [0] * sum(len(self.rewards_pos) + len(self.rewards_neg))
                     for i in self.rewards_pos:
                         self.classes[i] = self.REWARD_POS
+
+                elif args.reward_class == 'distance':
+                    """
+                    Classify states within a causality distance of a reward transition as "good"
+                    """
+                    self.classes = [0] * len(self.transitions)
+                    rewards_pos = self.transitions.get_where_list('reward > 0')
+                    for offset in rewards_pos:
+                        for j in reversed(range(args.reward_causality_distance)):
+                            if offset - j < 0:
+                                break
+                            if self.transitions[offset -j]['done']:
+                                break
+                            self.rewards_pos.append(offset - j)
+                            self.classes[offset - j] = self.REWARD_POS
+
+                    for i, cls in enumerate(self.classes):
+                        if cls != self.REWARD_POS:
+                            self.rewards_neg.append(i)
+
                 if print_stats:
                     self.print_stats()
                 return self
