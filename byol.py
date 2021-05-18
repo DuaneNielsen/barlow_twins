@@ -1,3 +1,5 @@
+from abc import ABC
+
 import pytorch_lightning as pl
 from pytorch_lightning import seed_everything
 from pl_bolts.callbacks.ssl_online import SSLOnlineEvaluator
@@ -33,6 +35,10 @@ import tables as tb
 from typing import *
 from sampler import SamplerFactory
 from torch.utils.data import DataLoader, Dataset
+import rich
+import rich.table
+from rich import print
+from statistics import mean
 
 
 class FixNineYearOldCodersJunk(nn.Module):
@@ -271,6 +277,7 @@ class BYOL(pl.LightningModule):
         parser.add_argument('--data_dir', type=str, default='.')
         parser.add_argument('--num_workers', default=8, type=int)
         parser.add_argument('--filename', type=str)
+        parser.add_argument('--rewards_class', type=str, default='monte_carlo')
 
         # optim
         parser.add_argument('--batch_size', type=int, default=256)
@@ -331,24 +338,77 @@ if __name__ == '__main__':
 
     elif args.dataset == 'atari':
 
-        class RefactoredNextStateReward(OnDiskReplayBuffer, torch.utils.data.Dataset):
+        class RefactoredNextStateReward(OnDiskReplayBuffer, torch.utils.data.Dataset, ABC):
+            REWARD_NEG: int = 0
+            REWARD_POS: int = 1
+
             def __init__(self):
                 super().__init__()
                 self.transforms = None
+                self.classes = []
+                self.rewards_pos = []
+                self.rewards_neg = []
 
-            def make_transition(self, trans):
+            def load(self, filename, print_stats=False):
+                super().load(filename)
+
+                if args.rewards_class == 'monte_carlo':
+                    monte_carlo_values = self.compute_monte_carlo_values(discount=0.6)
+                    for i, v in enumerate(monte_carlo_values):
+                        if v < 0.2:
+                            self.rewards_neg.append(i)
+                            self.classes.append(self.REWARD_NEG)
+                        else:
+                            self.rewards_pos.append(i)
+                            self.classes.append(self.REWARD_POS)
+                else:
+                    self.rewards_pos = self.transitions.get_where_list('reward > 0')
+                    self.rewards_neg = self.transitions.get_where_list('reward <= 0')
+                    self.classes = [0] * sum(len(self.rewards_pos) + len(self.rewards_neg))
+                    for i in self.rewards_pos:
+                        self.classes[i] = self.REWARD_POS
+                if print_stats:
+                    self.print_stats()
+                return self
+
+            def __getitem__(self, item):
+                trans = self.transitions[item]
                 s_p = self.states[trans['next_state']]
                 s_p = self.transforms(s_p)
-                r = trans['reward']
-                r = 0 if r == 0 else 1
+                r = self.classes[item]
                 return s_p, r
 
-            def get_positive_reward_index(self):
-                return self.transitions.get_where_list('reward > 0')
+            def print_stats(self):
+                table = rich.table.Table(title=f"{self.__class__.__name__}")
+                table.add_column("Stat", justify="right", style="cyan", no_wrap=True)
+                table.add_column("Title", style="magenta")
+                table.add_row("File", f'{self.fileh.filename}')
+                table.add_row("Episodes", f"{len(self.episodes)}")
+                epi_lengths = [(end - start).item() for start, end in self.fileh.root.replay.Episodes[:]]
+                table.add_row("Mean episode len", f"{mean(epi_lengths)}")
+                table.add_row("Transitions", f"{len(self)}")
+                table.add_row("Transitions with + reward", f"{len(self.transitions.get_where_list('reward > 0'))}")
+                table.add_row("Transitions with - reward", f"{len(self.transitions.get_where_list('reward < 0'))}")
+                table.add_row("Transitions with 0 reward", f"{len(self.transitions.get_where_list('reward == 0'))}")
+                table.add_row("Transitions labeled 0", f"{len(self.rewards_neg)}")
+                table.add_row("Transitions labeled 1", f"{len(self.rewards_pos)}")
 
-            def get_non_positive_reward_index(self):
-                return self.transitions.get_where_list('reward <= 0')
+                print(table)
 
+            def compute_monte_carlo_values(self, discount=0.99):
+                """ computes an estimate of the value of a state local to the episode"""
+                buffer_values = []
+                for epi in self.episodes:
+                    transitions = list(self.transitions[epi])
+                    values = []
+                    value = 0
+                    for trsn in reversed(transitions):
+                        values.append(value)
+                        value = value * discount + trsn['reward']
+                    values = reversed(values)
+                    buffer_values += values
+
+                return buffer_values
 
         class AtariDataModule(pl.LightningDataModule):
             def __init__(self, filename, train_transforms, val_transforms, test_transforms,
@@ -383,23 +443,21 @@ if __name__ == '__main__':
                 self.val_set = RefactoredNextStateReward().load(args.filename)
                 self.val_set.transforms = self.val_transforms
 
-                rewards_pos = self.train_set.get_positive_reward_index()
-                rewards_nonpos = self.train_set.get_non_positive_reward_index()
-
                 def split_index(index):
                     return index[:ceil(len(index) * 0.8)], index[floor(len(index) * 0.8):]
 
-                train_rewards_pos, val_rewards_pos = split_index(rewards_pos)
-                train_rewards_nonpos, val_rewards_nonpos = split_index(rewards_nonpos)
+                train_rewards_pos, val_rewards_pos = split_index(self.train_set.rewards_pos)
+                train_rewards_nonpos, val_rewards_nonpos = split_index(self.train_set.rewards_neg)
+
                 self.train_sampler = SamplerFactory().get(
-                    class_idxs=[train_rewards_pos, train_rewards_nonpos],
+                    class_idxs=[train_rewards_nonpos, train_rewards_pos],
                     batch_size=args.batch_size,
                     n_batches=1024,
                     alpha=0.5,
                     kind='fixed'
                 )
                 self.val_sampler = SamplerFactory().get(
-                    class_idxs=[train_rewards_pos, train_rewards_nonpos],
+                    class_idxs=[train_rewards_nonpos, train_rewards_pos],
                     batch_size=args.batch_size,
                     n_batches=1024,
                     alpha=0.5,
@@ -426,82 +484,6 @@ if __name__ == '__main__':
                 """ The val dataloader """
                 return self._data_loader(self.val_set, batch_sampler=self.val_sampler, shuffle=self.shuffle)
 
-
-    # class NextStateReward(OnDiskReplayBuffer, torch.utils.data.Dataset):
-    #     def __init__(self, transforms):
-    #         super().__init__()
-    #         self.transforms = transforms
-    #
-    #     def make_transition(self, trans):
-    #         s_p = self.states[trans['next_state']]
-    #         s_p = self.transforms(s_p)
-    #         r = trans['reward']
-    #         r = 0 if r == 0 else 1
-    #         return s_p, r
-    #
-    #     @staticmethod
-    #     def load_splits(filename):
-    #         """
-    #         returns non overlapping random splits of the dataset
-    #         filename: the filename
-    #         :param lengths: list of lengths of each split, [10, 4, 3] 10 is length of split 0, etc...
-    #         :return: None
-    #         """
-    #         assert os.path.isfile(filename), f"{filename} does not exist"
-    #         fileh = tb.open_file(filename, mode='r')
-    #         length = len(fileh.root.replay.Transitions)
-    #         test_len = ceil(length / 2)
-    #         val_len = floor(length / 2)
-    #         indices = np.random.permutation(length)
-    #
-    #         train_transforms = torchvision.transforms.Compose([
-    #             torchvision.transforms.ToPILImage(),
-    #             torchvision.transforms.Resize(size=(args.input_size, args.input_size)),
-    #             SimCLRTrainDataTransform(args.input_size)
-    #         ])
-    #         val_transforms = torchvision.transforms.Compose([
-    #             torchvision.transforms.ToPILImage(),
-    #             torchvision.transforms.Resize(size=(args.input_size, args.input_size)),
-    #             SimCLREvalDataTransform(args.input_size)
-    #         ])
-    #
-    #         train_set = NextStateReward(train_transforms)
-    #         train_set.fileh = fileh
-    #         train_set.split = indices[0:test_len]
-    #
-    #         val_set = NextStateReward(val_transforms)
-    #         val_set.fileh = fileh
-    #         val_set.split = indices[test_len:]
-    #
-    #         def balanced_split(val_set):
-    #             # create a balanced set of reward positive and no reward
-    #             reward_pos, reward_zero = [], []
-    #             for i in track(val_set.split, description='[blue]balancing'):
-    #                 reward = val_set.transitions[i]['reward']
-    #                 if reward == 0:
-    #                     reward_zero += [i]
-    #                 if reward > 0:
-    #                     reward_pos += [i]
-    #             reward_zero = reward_zero[:len(reward_pos)]
-    #             return list(itertools.chain(*zip(reward_pos, reward_zero)))
-    #
-    #         train_set.split = balanced_split(train_set)
-    #         val_set.split = balanced_split(val_set)
-    #         # hack to test if the classification problem is solvable
-    #         # train_set.split = np.concatenate((train_set.split, np.array(reward_pos)))
-    #
-    #         return train_set, val_set
-    #
-    #
-    # train_set, val_set = NextStateReward.load_splits(args.filename)
-    #
-    # dm = pl.LightningDataModule.from_datasets(
-    #     train_dataset=train_set,
-    #     val_dataset=val_set,
-    #     test_dataset=None,
-    #     batch_size=args.batch_size,
-    #     num_workers=args.num_workers
-    # )
 
         train_transforms = torchvision.transforms.Compose([
             torchvision.transforms.ToPILImage(),
