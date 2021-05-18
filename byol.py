@@ -279,7 +279,7 @@ class BYOL(pl.LightningModule):
         parser.add_argument('--filename', type=str)
         reward_class_choices = ['monte_carlo', 'positive_reward', 'distance']
         parser.add_argument('--reward_class', type=str, default='monte_carlo', choices=reward_class_choices)
-        parser.add_argument('--reward_causality_dist', type=int, default=5)
+        parser.add_argument('--reward_causality_distance', type=int, default=5)
         parser.add_argument('--reward_monte_carlo_discount', type=float, default=0.6)
         parser.add_argument('--reward_threshold', type=float, default=0.5)
 
