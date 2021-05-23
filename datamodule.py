@@ -128,15 +128,42 @@ class H5NextStateReward(b5.Buffer, torch.utils.data.Dataset, ABC):
         self.classes = []
         self.rewards_pos = []
         self.rewards_neg = []
+        self.reward_causality_distance = 5
 
     def load(self, filename, mode='r'):
         super().load(filename, mode)
         self.classes = np.zeros(self.steps, dtype=np.int64)
-        self.initials = self.episodes[:self.num_episodes]
+        initials = self.episodes[:self.num_episodes]
+        initials_mask = np.zeros(self.steps, dtype=np.uint8)
+        initials_mask[initials] = 1
+        initials_mask = initials_mask.astype(np.bool_)
         reward_pos = self.reward[:self.steps] > 0.0
+
+        """
+        When we hit a reward, flag the states that lead up to it as rewarding
+        but not if they are from a different trajectory!
+        """
+        counter = 0
+        for i in track(reversed(range(self.steps)), total=self.steps):
+            r = reward_pos[i]
+            initial = initials_mask[i]
+            if r:
+                counter = self.reward_causality_distance
+            if counter > 0:
+                reward_pos[i] = True
+                if initial:
+                    counter = 0
+                else:
+                    counter -= 1
+
         self.rewards_pos, = np.where(reward_pos)
         self.rewards_neg, = np.where(reward_pos == False)
         self.classes = reward_pos.astype(dtype=np.int64)
+
+    def make_stat_table(self):
+        table = super().make_stat_table()
+        table.add_row("Labeled reward_pos", f"{np.count_nonzero(self.classes)}")
+        return table
 
     def __len__(self):
         return self.n_gram_len(gram_len=1)
