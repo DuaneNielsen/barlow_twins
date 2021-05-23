@@ -1,5 +1,3 @@
-from abc import ABC
-
 import pytorch_lightning as pl
 from pytorch_lightning import seed_everything
 from pl_bolts.callbacks.ssl_online import SSLOnlineEvaluator
@@ -9,36 +7,21 @@ from pytorch_lightning.loggers.wandb import WandbLogger
 
 from argparse import ArgumentParser
 from copy import deepcopy
-from typing import Any
 
 import torch
 import torch.nn as nn
 import torch.hub
 from torch.nn import functional as F
 from torch.optim import Adam
-from torchvision.transforms import Compose, Resize
 from pathlib import Path
 
 from pl_bolts.callbacks.byol_updates import BYOLMAWeightUpdate
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from pl_bolts.utils.self_supervised import torchvision_ssl_encoder
-from rl import OnDiskReplayBuffer
-from torch.utils.data import random_split
-import random
-import itertools
+
+from datamodule import AtariDataModule
 import torchvision.transforms
-import numpy as np
-from math import ceil, floor
-from rich.progress import track
-import os
-import tables as tb
 from typing import *
-from sampler import SamplerFactory
-from torch.utils.data import DataLoader, Dataset
-import rich
-import rich.table
-from rich import print
-from statistics import mean
 
 
 class FixNineYearOldCodersJunk(nn.Module):
@@ -343,181 +326,6 @@ if __name__ == '__main__':
 
     elif args.dataset == 'atari':
 
-        class RefactoredNextStateReward(OnDiskReplayBuffer, torch.utils.data.Dataset, ABC):
-            REWARD_NEG: int = 0
-            REWARD_POS: int = 1
-
-            def __init__(self):
-                super().__init__()
-                self.transforms = None
-                self.classes = []
-                self.rewards_pos = []
-                self.rewards_neg = []
-
-            def load(self, filename, print_stats=False):
-                super().load(filename)
-
-                if args.reward_class == 'monte_carlo':
-                    """
-                    Classify states with a discounted monte_carlo value greater than threshold as "good"
-                    """
-
-                    monte_carlo_values = self.compute_monte_carlo_values(discount=args.reward_monte_carlo_discount)
-                    for i, v in enumerate(monte_carlo_values):
-                        if v < args.reward_threshold:
-                            self.rewards_neg.append(i)
-                            self.classes.append(self.REWARD_NEG)
-                        else:
-                            self.rewards_pos.append(i)
-                            self.classes.append(self.REWARD_POS)
-
-                elif args.reward_class == 'positive_reward':
-                    """
-                    Classify only states with positive reward as "good"
-                    """
-                    self.rewards_pos = self.transitions.get_where_list('reward > 0')
-                    self.rewards_neg = self.transitions.get_where_list('reward <= 0')
-                    self.classes = [0] * sum(len(self.rewards_pos) + len(self.rewards_neg))
-                    for i in self.rewards_pos:
-                        self.classes[i] = self.REWARD_POS
-
-                elif args.reward_class == 'distance':
-                    """
-                    Classify states within a causality distance of a reward transition as "good"
-                    """
-                    self.classes = [0] * len(self.transitions)
-                    rewards_pos = self.transitions.get_where_list('reward > 0')
-                    for offset in rewards_pos:
-                        for j in reversed(range(args.reward_causality_distance)):
-                            if offset - j < 0:
-                                break
-                            if self.transitions[offset -j]['done']:
-                                break
-                            self.rewards_pos.append(offset - j)
-                            self.classes[offset - j] = self.REWARD_POS
-
-                    for i, cls in enumerate(self.classes):
-                        if cls != self.REWARD_POS:
-                            self.rewards_neg.append(i)
-
-                if print_stats:
-                    self.print_stats()
-                return self
-
-            def __getitem__(self, item):
-                trans = self.transitions[item]
-                s_p = self.states[trans['next_state']]
-                s_p = self.transforms(s_p)
-                r = self.classes[item]
-                return s_p, r
-
-            def print_stats(self):
-                table = rich.table.Table(title=f"{self.__class__.__name__}")
-                table.add_column("Stat", justify="right", style="cyan", no_wrap=True)
-                table.add_column("Title", style="magenta")
-                table.add_row("File", f'{self.fileh.filename}')
-                table.add_row("Episodes", f"{len(self.episodes)}")
-                epi_lengths = [(end - start).item() for start, end in self.fileh.root.replay.Episodes[:]]
-                table.add_row("Mean episode len", f"{mean(epi_lengths)}")
-                table.add_row("Transitions", f"{len(self)}")
-                table.add_row("Transitions with + reward", f"{len(self.transitions.get_where_list('reward > 0'))}")
-                table.add_row("Transitions with - reward", f"{len(self.transitions.get_where_list('reward < 0'))}")
-                table.add_row("Transitions with 0 reward", f"{len(self.transitions.get_where_list('reward == 0'))}")
-                table.add_row("Transitions labeled 0", f"{len(self.rewards_neg)}")
-                table.add_row("Transitions labeled 1", f"{len(self.rewards_pos)}")
-
-                print(table)
-
-            def compute_monte_carlo_values(self, discount=0.99):
-                """ computes an estimate of the value of a state local to the episode"""
-                buffer_values = []
-                for epi in self.episodes:
-                    transitions = list(self.transitions[epi])
-                    values = []
-                    value = 0
-                    for trsn in reversed(transitions):
-                        values.append(value)
-                        value = value * discount + trsn['reward']
-                    values = reversed(values)
-                    buffer_values += values
-
-                return buffer_values
-
-        class AtariDataModule(pl.LightningDataModule):
-            def __init__(self, filename, train_transforms, val_transforms, test_transforms,
-                         val_split: Union[int, float] = 0.2,
-                         num_workers: int = 0,
-                         normalize: bool = False,
-                         batch_size: int = 32,
-                         seed: int = 42,
-                         shuffle: bool = False,
-                         pin_memory: bool = False,
-                         drop_last: bool = False,
-                         ):
-                super().__init__(train_transforms, val_transforms, test_transforms)
-                self.filename = filename
-                self.buffer = None
-                self.train_set = None
-                self.val_set = None
-                self.val_split = val_split
-                self.num_workers = num_workers
-                self.normalize = normalize
-                self.batch_size = batch_size
-                self.seed = seed
-                self.shuffle = shuffle
-                self.pin_memory = pin_memory
-                self.drop_last = drop_last
-                self.val_sampler = None
-                self.train_sampler = None
-
-            def setup(self, stage: Optional[str] = None) -> None:
-                self.train_set = RefactoredNextStateReward().load(args.filename, print_stats=True)
-                self.train_set.transforms = self.train_transforms
-                self.val_set = RefactoredNextStateReward().load(args.filename)
-                self.val_set.transforms = self.val_transforms
-
-                def split_index(index):
-                    return index[:ceil(len(index) * 0.8)], index[floor(len(index) * 0.8):]
-
-                train_rewards_pos, val_rewards_pos = split_index(self.train_set.rewards_pos)
-                train_rewards_nonpos, val_rewards_nonpos = split_index(self.train_set.rewards_neg)
-
-                self.train_sampler = SamplerFactory().get(
-                    class_idxs=[train_rewards_nonpos, train_rewards_pos],
-                    batch_size=args.batch_size,
-                    n_batches=1024,
-                    alpha=0.5,
-                    kind='fixed'
-                )
-                self.val_sampler = SamplerFactory().get(
-                    class_idxs=[train_rewards_nonpos, train_rewards_pos],
-                    batch_size=args.batch_size,
-                    n_batches=1024,
-                    alpha=0.5,
-                    kind='fixed'
-                )
-
-            def _data_loader(self, dataset: torch.utils.data.Dataset,
-                             batch_sampler,
-                             shuffle: bool = False) -> torch.utils.data.DataLoader:
-                return torch.utils.data.DataLoader(
-                    dataset,
-                    batch_sampler=batch_sampler,
-                    shuffle=shuffle,
-                    num_workers=self.num_workers,
-                    drop_last=self.drop_last,
-                    pin_memory=self.pin_memory
-                )
-
-            def train_dataloader(self, *args: Any, **kwargs: Any) -> DataLoader:
-                """ The train dataloader """
-                return self._data_loader(self.train_set, batch_sampler=self.train_sampler, shuffle=self.shuffle)
-
-            def val_dataloader(self, *args: Any, **kwargs: Any) -> Union[DataLoader, List[DataLoader]]:
-                """ The val dataloader """
-                return self._data_loader(self.val_set, batch_sampler=self.val_sampler, shuffle=self.shuffle)
-
-
         train_transforms = torchvision.transforms.Compose([
             torchvision.transforms.ToPILImage(),
             torchvision.transforms.Resize(size=(args.input_size, args.input_size)),
@@ -529,32 +337,32 @@ if __name__ == '__main__':
             SimCLREvalDataTransform(args.input_size)
         ])
 
-        dm = AtariDataModule(args.filename, train_transforms, val_transforms, None)
+        dm = AtariDataModule(args.filename, train_transforms, val_transforms, None, batch_size=args.batch_size)
         dm.num_classes = 2
         args.num_classes = 2
 
-encoder = None
-if args.vision_model == 'atari':
-    encoder = AtariVision()
-elif args.vision_model == 'resnet-50':
-    encoder = torchvision_ssl_encoder('resnet50')
-    encoder = FixNineYearOldCodersJunk(encoder)
-else:
-    encoder = torch.hub.load(repo_or_dir='rwightman/gen-efficientnet-pytorch', model=args.vision_model,
-                             pretrained=args.pretrained)
-    if encoder.classifier.in_features == 2048:
-        encoder.classifier = nn.Identity()
+    encoder = None
+    if args.vision_model == 'atari':
+        encoder = AtariVision()
+    elif args.vision_model == 'resnet-50':
+        encoder = torchvision_ssl_encoder('resnet50')
+        encoder = FixNineYearOldCodersJunk(encoder)
     else:
-        encoder.classifier = nn.Linear(encoder.classifier.in_features, 2048, bias=False)
+        encoder = torch.hub.load(repo_or_dir='rwightman/gen-efficientnet-pytorch', model=args.vision_model,
+                                 pretrained=args.pretrained)
+        if encoder.classifier.in_features == 2048:
+            encoder.classifier = nn.Identity()
+        else:
+            encoder.classifier = nn.Linear(encoder.classifier.in_features, 2048, bias=False)
 
-model = BYOL(encoder=encoder, **args.__dict__)
+    model = BYOL(encoder=encoder, **args.__dict__)
 
-save_dir = f'./{args.vision_model}-{args.input_size}'
-Path(save_dir).mkdir(parents=True, exist_ok=True)
-wandb_logger = WandbLogger(project=f"byol-{args.dataset}-breakout", save_dir=save_dir, log_model=False)
-# finetune in real-time
-online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes)
-# DEFAULTS used by the Trainer
-trainer = pl.Trainer.from_argparse_args(args, max_steps=300000, callbacks=[online_eval])
-trainer.logger = wandb_logger
-trainer.fit(model, datamodule=dm)
+    save_dir = f'./{args.vision_model}-{args.input_size}'
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
+    wandb_logger = WandbLogger(project=f"byol-{args.dataset}-breakout", save_dir=save_dir, log_model=False)
+    # finetune in real-time
+    online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes)
+    # DEFAULTS used by the Trainer
+    trainer = pl.Trainer.from_argparse_args(args, max_steps=300000, callbacks=[online_eval])
+    trainer.logger = wandb_logger
+    trainer.fit(model, datamodule=dm)
