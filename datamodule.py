@@ -1,121 +1,18 @@
 from abc import ABC
 from math import ceil, floor
-from statistics import mean
 from typing import Union, Optional, Any, List
 
 import pytorch_lightning as pl
-import rich.table
 import torch
 import torch.utils
 from rich.progress import track
-from rich import print
 from torch.utils.data import DataLoader
 
 import buffer_h5 as b5
-from rl import OnDiskReplayBuffer
 from sampler import SamplerFactory
-import time
 import numpy as np
-
-
-class RefactoredNextStateReward(OnDiskReplayBuffer, torch.utils.data.Dataset, ABC):
-    REWARD_NEG: int = 0
-    REWARD_POS: int = 1
-
-    def __init__(self):
-        super().__init__()
-        self.transforms = None
-        self.classes = []
-        self.rewards_pos = []
-        self.rewards_neg = []
-
-    def load(self, filename, print_stats=False, **kwargs):
-        super().load(filename)
-
-        if kwargs['reward_class'] == 'monte_carlo':
-            """
-            Classify states with a discounted monte_carlo value greater than threshold as "good"
-            """
-
-            monte_carlo_values = self.compute_monte_carlo_values(discount=kwargs['reward_monte_carlo_discount'])
-            for i, v in enumerate(monte_carlo_values):
-                if v < kwargs['reward_threshold']:
-                    self.rewards_neg.append(i)
-                    self.classes.append(self.REWARD_NEG)
-                else:
-                    self.rewards_pos.append(i)
-                    self.classes.append(self.REWARD_POS)
-
-        elif kwargs['reward_class'] == 'positive_reward':
-            """
-            Classify only states with positive reward as "good"
-            """
-            self.rewards_pos = self.transitions.get_where_list('reward > 0')
-            self.rewards_neg = self.transitions.get_where_list('reward <= 0')
-            self.classes = [0] * sum(len(self.rewards_pos) + len(self.rewards_neg))
-            for i in self.rewards_pos:
-                self.classes[i] = self.REWARD_POS
-
-        elif kwargs['reward_class'] == 'distance':
-            """
-            Classify states within a causality distance of a reward transition as "good"
-            """
-            self.classes = [0] * len(self.transitions)
-            rewards_pos = self.transitions.get_where_list('reward > 0')
-            for offset in rewards_pos:
-                for j in reversed(range(kwargs['reward_causality_distance'])):
-                    if offset - j < 0:
-                        break
-                    if self.transitions[offset -j]['done']:
-                        break
-                    self.rewards_pos.append(offset - j)
-                    self.classes[offset - j] = self.REWARD_POS
-
-            for i, cls in enumerate(self.classes):
-                if cls != self.REWARD_POS:
-                    self.rewards_neg.append(i)
-
-        if print_stats:
-            self.print_stats()
-        return self
-
-    def __getitem__(self, item):
-        trans = self.transitions[item]
-        s_p = self.states[trans['next_state']]
-        s_p = self.transforms(s_p)
-        r = self.classes[item]
-        return s_p, r
-
-    def print_stats(self):
-        table = rich.table.Table(title=f"{self.__class__.__name__}")
-        table.add_column("Stat", justify="right", style="cyan", no_wrap=True)
-        table.add_column("Title", style="magenta")
-        table.add_row("File", f'{self.fileh.filename}')
-        table.add_row("Episodes", f"{len(self.episodes)}")
-        epi_lengths = [(end - start).item() for start, end in self.fileh.root.replay.Episodes[:]]
-        table.add_row("Mean episode len", f"{mean(epi_lengths)}")
-        table.add_row("Transitions", f"{len(self)}")
-        table.add_row("Transitions with + reward", f"{len(self.transitions.get_where_list('reward > 0'))}")
-        table.add_row("Transitions with - reward", f"{len(self.transitions.get_where_list('reward < 0'))}")
-        table.add_row("Transitions with 0 reward", f"{len(self.transitions.get_where_list('reward == 0'))}")
-        table.add_row("Transitions labeled 0", f"{len(self.rewards_neg)}")
-        table.add_row("Transitions labeled 1", f"{len(self.rewards_pos)}")
-        print(table)
-
-    def compute_monte_carlo_values(self, discount=0.99):
-        """ computes an estimate of the value of a state local to the episode"""
-        buffer_values = []
-        for epi in self.episodes:
-            transitions = list(self.transitions[epi])
-            values = []
-            value = 0
-            for trsn in reversed(transitions):
-                values.append(value)
-                value = value * discount + trsn['reward']
-            values = reversed(values)
-            buffer_values += values
-
-        return buffer_values
+from torchvision import transforms
+from transforms import GaussianBlur
 
 
 class H5NextStateReward(b5.Buffer, torch.utils.data.Dataset, ABC):
@@ -130,8 +27,8 @@ class H5NextStateReward(b5.Buffer, torch.utils.data.Dataset, ABC):
         self.rewards_neg = []
         self.reward_causality_distance = 5
 
-    def load(self, filename, mode='r', reward_causality_distance=5):
-        super().load(filename, mode)
+    def load(self, filename, mode='r', cache_bytes=1073741824, cache_slots=100000, cache_w0=0.0, reward_causality_distance=5):
+        super().load(filename, mode, cache_bytes, cache_slots, cache_w0)
         self.reward_causality_distance = reward_causality_distance
         self.classes = np.zeros(self.steps, dtype=np.int64)
         initials = self.episodes[:self.num_episodes]
@@ -171,9 +68,12 @@ class H5NextStateReward(b5.Buffer, torch.utils.data.Dataset, ABC):
         return self.n_gram_len(gram_len=1)
 
     def __getitem__(self, item):
-        image = self.transforms(self.raw[item])
+        raw = self.raw[item]
+        grad = self.replay['grad'][item]
+        image = np.concatenate((raw, grad), axis=2)
+        x = self.transforms(image)
         label = self.classes[item]
-        return image, label
+        return x, label
 
 
 class AtariDataModule(pl.LightningDataModule):
@@ -186,6 +86,7 @@ class AtariDataModule(pl.LightningDataModule):
                  shuffle: bool = False,
                  pin_memory: bool = False,
                  drop_last: bool = False,
+                 batches_per_epoch: int = 1024
                  ):
         super().__init__(train_transforms, val_transforms, test_transforms)
         self.filename = filename
@@ -196,6 +97,7 @@ class AtariDataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.normalize = normalize
         self.batch_size = batch_size
+        self.batches_per_epoch = batches_per_epoch
         self.seed = seed
         self.shuffle = shuffle
         self.pin_memory = pin_memory
@@ -222,14 +124,14 @@ class AtariDataModule(pl.LightningDataModule):
         self.train_sampler = SamplerFactory().get(
             class_idxs=[train_rewards_nonpos, train_rewards_pos],
             batch_size=self.batch_size,
-            n_batches=1024,
+            n_batches=self.batches_per_epoch,
             alpha=0.5,
             kind='fixed'
         )
         self.val_sampler = SamplerFactory().get(
             class_idxs=[train_rewards_nonpos, train_rewards_pos],
             batch_size=self.batch_size,
-            n_batches=1024,
+            n_batches=self.batches_per_epoch // 10,
             alpha=0.5,
             kind='fixed'
         )

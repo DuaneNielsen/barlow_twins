@@ -3,10 +3,12 @@ from pytorch_lightning import seed_everything
 from pl_bolts.callbacks.ssl_online import SSLOnlineEvaluator
 from pl_bolts.datamodules import CIFAR10DataModule, ImagenetDataModule, STL10DataModule
 from pl_bolts.models.self_supervised.simclr import SimCLREvalDataTransform, SimCLRTrainDataTransform
+from transforms import AtariSimCLRTrainDataTransform, AtariSimCLREvalDataTransform, SimCLRFinetuneTransform
 from pytorch_lightning.loggers.wandb import WandbLogger
 
 from argparse import ArgumentParser
 from copy import deepcopy
+import torch.nn as nn
 
 import torch
 import torch.nn as nn
@@ -21,7 +23,8 @@ from pl_bolts.utils.self_supervised import torchvision_ssl_encoder
 
 from datamodule import AtariDataModule
 import torchvision.transforms
-from typing import *
+from typing import Any
+from image_viewer import CV2ModelImageSampler
 
 
 class FixNineYearOldCodersJunk(nn.Module):
@@ -276,6 +279,7 @@ class BYOL(pl.LightningModule):
         parser.add_argument('--vision_model', type=str, default='resnet-50')
         parser.add_argument('--vision_model_from_pytorch_hub', type=str, nargs=2, default=None)
         parser.add_argument('--pretrained', action='store_true', default=False)
+        parser.add_argument('--debug', action='store_true', default=False)
 
         # Model
         parser.add_argument('--meta_dir', default='.', type=str, help='path to meta.bin for imagenet')
@@ -306,6 +310,7 @@ if __name__ == '__main__':
         dm.train_transforms = SimCLRTrainDataTransform(args.input_size)
         dm.val_transforms = SimCLREvalDataTransform(args.input_size)
         args.num_classes = dm.num_classes
+        dm.num_channels = 3
 
     elif args.dataset == 'stl10':
         dm = STL10DataModule.from_argparse_args(args)
@@ -316,28 +321,23 @@ if __name__ == '__main__':
         dm.train_transforms = SimCLRTrainDataTransform(h)
         dm.val_transforms = SimCLREvalDataTransform(h)
         args.num_classes = dm.num_classes
+        dm.num_channels = 3
 
     elif args.dataset == 'imagenet2012':
         dm = ImagenetDataModule.from_argparse_args(args, image_size=196)
         (c, h, w) = dm.size()
         dm.train_transforms = SimCLRTrainDataTransform(h)
         dm.val_transforms = SimCLREvalDataTransform(h)
+        dm.num_channels = 3
         args.num_classes = dm.num_classes
 
     elif args.dataset == 'atari':
-
-        train_transforms = torchvision.transforms.Compose([
-            torchvision.transforms.ToPILImage(),
-            torchvision.transforms.Resize(size=(args.input_size, args.input_size)),
-            SimCLRTrainDataTransform(args.input_size)
-        ])
-        val_transforms = torchvision.transforms.Compose([
-            torchvision.transforms.ToPILImage(),
-            torchvision.transforms.Resize(size=(args.input_size, args.input_size)),
-            SimCLREvalDataTransform(args.input_size)
-        ])
+        
+        train_transforms = AtariSimCLRTrainDataTransform(input_height=args.input_size)
+        val_transforms = AtariSimCLREvalDataTransform(input_height=args.input_size)
 
         dm = AtariDataModule(args.filename, train_transforms, val_transforms, None, batch_size=args.batch_size)
+        dm.num_channels = 6
         dm.num_classes = 2
         args.num_classes = 2
 
@@ -345,11 +345,13 @@ if __name__ == '__main__':
     if args.vision_model == 'atari':
         encoder = AtariVision()
     elif args.vision_model == 'resnet-50':
-        encoder = torchvision_ssl_encoder('resnet50')
+        #encoder = torchvision_ssl_encoder('resnet50')
         encoder = FixNineYearOldCodersJunk(encoder)
     else:
         encoder = torch.hub.load(repo_or_dir='rwightman/gen-efficientnet-pytorch', model=args.vision_model,
                                  pretrained=args.pretrained)
+        encoder.conv_stem = nn.Conv2d(dm.num_channels, 32, kernel_size=3, stride=2, padding=1, bias=False)
+
         if encoder.classifier.in_features == 2048:
             encoder.classifier = nn.Identity()
         else:
@@ -362,7 +364,13 @@ if __name__ == '__main__':
     wandb_logger = WandbLogger(project=f"byol-{args.dataset}-breakout", save_dir=save_dir, log_model=False)
     # finetune in real-time
     online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes)
+    image_viewer = CV2ModelImageSampler()
     # DEFAULTS used by the Trainer
-    trainer = pl.Trainer.from_argparse_args(args, max_steps=300000, callbacks=[online_eval])
+    callbacks = [online_eval]
+
+    if args.debug:
+        callbacks += [image_viewer]
+
+    trainer = pl.Trainer.from_argparse_args(args, max_steps=300000, callbacks=callbacks)
     trainer.logger = wandb_logger
     trainer.fit(model, datamodule=dm)
