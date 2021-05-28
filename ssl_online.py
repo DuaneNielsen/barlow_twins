@@ -56,7 +56,7 @@ class SSLOnlineEvaluator(Callback):  # pragma: no cover
         self.num_classes = num_classes
         self.dataset = dataset
 
-        self.confusion_matrix = ConfusionMatrix(num_classes)
+        self.confusion_matrix = None
 
         self.time_to_sample = True
         self.images = None
@@ -75,8 +75,9 @@ class SSLOnlineEvaluator(Callback):  # pragma: no cover
             n_hidden=self.hidden_dim,
         ).to(pl_module.device)
 
+        self.confusion_matrix = ConfusionMatrix(self.num_classes).to(pl_module.device)
+
         self.optimizer = torch.optim.Adam(pl_module.non_linear_evaluator.parameters(), lr=1e-4)
-        self.confusion_matrix = self.confusion_matrix.to(pl_module.device)
 
     def get_representations(self, pl_module: LightningModule, x: Tensor) -> Tensor:
         representations = pl_module(x)
@@ -127,7 +128,7 @@ class SSLOnlineEvaluator(Callback):  # pragma: no cover
         train_acc = accuracy(mlp_preds, y)
         pl_module.log('online_train_acc', train_acc, on_step=True, on_epoch=False)
         pl_module.log('online_train_loss', mlp_loss, on_step=True, on_epoch=False)
-        self.time_to_sample = True
+
 
     def on_validation_batch_end(
         self,
@@ -174,3 +175,5 @@ class SSLOnlineEvaluator(Callback):  # pragma: no cover
         table = wandb.Table(data=table, columns=['epoch', 'label', 'pred', 'image'])
         pl_module.logger.experiment.log({'validation_sample': table})
         self.epoch += 1
+        self.confusion_matrix = ConfusionMatrix(self.num_classes).to(pl_module.device)
+        self.time_to_sample = True
