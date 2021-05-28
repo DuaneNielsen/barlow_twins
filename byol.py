@@ -1,6 +1,6 @@
 import pytorch_lightning as pl
 from pytorch_lightning import seed_everything
-from pl_bolts.callbacks.ssl_online import SSLOnlineEvaluator
+from ssl_online import SSLOnlineEvaluator
 from pl_bolts.datamodules import CIFAR10DataModule, ImagenetDataModule, STL10DataModule
 from pl_bolts.models.self_supervised.simclr import SimCLREvalDataTransform, SimCLRTrainDataTransform
 from transforms import AtariSimCLRTrainDataTransform, AtariSimCLREvalDataTransform, SimCLRFinetuneTransform
@@ -280,6 +280,7 @@ class BYOL(pl.LightningModule):
         parser.add_argument('--vision_model_from_pytorch_hub', type=str, nargs=2, default=None)
         parser.add_argument('--pretrained', action='store_true', default=False)
         parser.add_argument('--debug', action='store_true', default=False)
+        parser.add_argument('--batches_per_epoch', type=int, default=1024)
 
         # Model
         parser.add_argument('--meta_dir', default='.', type=str, help='path to meta.bin for imagenet')
@@ -336,7 +337,8 @@ if __name__ == '__main__':
         train_transforms = AtariSimCLRTrainDataTransform(input_height=args.input_size)
         val_transforms = AtariSimCLREvalDataTransform(input_height=args.input_size)
 
-        dm = AtariDataModule(args.filename, train_transforms, val_transforms, None, batch_size=args.batch_size)
+        dm = AtariDataModule(args.filename, train_transforms, val_transforms, None,
+                             batch_size=args.batch_size, batches_per_epoch=args.batches_per_epoch)
         dm.num_channels = 6
         dm.num_classes = 2
         args.num_classes = 2
