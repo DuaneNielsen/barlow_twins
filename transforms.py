@@ -133,8 +133,8 @@ class AtariSimCLREvalDataTransform(AtariSimCLRTrainDataTransform):
         # replace online transform with eval time transform
         self.online_transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Resize(int(self.input_height + 0.1 * self.input_height)),
-            transforms.CenterCrop(self.input_height),
+            transforms.Resize(size=(input_height, input_height)),
+            #transforms.CenterCrop(self.input_height),
         ])
 
 

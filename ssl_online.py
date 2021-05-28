@@ -58,6 +58,13 @@ class SSLOnlineEvaluator(Callback):  # pragma: no cover
 
         self.confusion_matrix = ConfusionMatrix(num_classes)
 
+        self.time_to_sample = True
+        self.images = None
+        self.mlp_preds = None
+        self.labels = None
+        self.batch_size = None
+        self.epoch = 0
+
     def on_pretrain_routine_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         from pl_bolts.models.self_supervised.evaluator import SSLEvaluator
 
@@ -120,6 +127,7 @@ class SSLOnlineEvaluator(Callback):  # pragma: no cover
         train_acc = accuracy(mlp_preds, y)
         pl_module.log('online_train_acc', train_acc, on_step=True, on_epoch=False)
         pl_module.log('online_train_loss', mlp_loss, on_step=True, on_epoch=False)
+        self.time_to_sample = True
 
     def on_validation_batch_end(
         self,
@@ -147,9 +155,22 @@ class SSLOnlineEvaluator(Callback):  # pragma: no cover
         pl_module.log('online_val_loss', mlp_loss, on_step=False, on_epoch=True, sync_dist=True)
         self.confusion_matrix(mlp_preds, y)
 
+        if self.time_to_sample:
+            N, C, H, W = batch[0][2].shape
+            num = min(N, 16)
+            self.images = batch[0][2][0:num]
+            self.mlp_preds = torch.argmax(mlp_preds[0:num], dim=1)
+            self.labels = y[0:num]
+            self.time_to_sample = False
+
     def on_validation_epoch_end(self, trainer: 'pl.Trainer', pl_module: 'pl.LightningModule') -> None:
         confusion = self.confusion_matrix.compute()
         confusion = confusion.type(torch.int)
         confusion_table = wandb.Table(data=confusion.tolist(), columns=['no_reward', 'reward'])
         pl_module.logger.experiment.log({'confusion': confusion_table})
-
+        table = []
+        for image, pred, label in zip(self.images.unbind(0), self.mlp_preds.unbind(0), self.labels.unbind(0)):
+            table.append((self.epoch, label.cpu(), pred.cpu(), wandb.Image(image[0:3].detach().cpu())))
+        table = wandb.Table(data=table, columns=['epoch', 'label', 'pred', 'image'])
+        pl_module.logger.experiment.log({'validation_sample': table})
+        self.epoch += 1
