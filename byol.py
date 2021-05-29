@@ -1,6 +1,8 @@
 import pytorch_lightning as pl
+from pl_bolts.callbacks import SSLOnlineEvaluator as OldSSLOnlineEvaluator
 from pytorch_lightning import seed_everything
-from ssl_online import SSLOnlineEvaluator
+from ssl_online import SSLOnlineEvaluator as SSLOnlineEvaluator
+
 from pl_bolts.datamodules import CIFAR10DataModule, ImagenetDataModule, STL10DataModule
 from pl_bolts.models.self_supervised.simclr import SimCLREvalDataTransform, SimCLRTrainDataTransform
 from transforms import AtariSimCLRTrainDataTransform, AtariSimCLREvalDataTransform, SimCLRFinetuneTransform
@@ -279,6 +281,7 @@ class BYOL(pl.LightningModule):
         parser.add_argument('--vision_model', type=str, default='resnet-50')
         parser.add_argument('--vision_model_from_pytorch_hub', type=str, nargs=2, default=None)
         parser.add_argument('--pretrained', action='store_true', default=False)
+        parser.add_argument('--old_eval', action='store_true', default=False)
         parser.add_argument('--debug', action='store_true', default=False)
         parser.add_argument('--batches_per_epoch', type=int, default=1024)
 
@@ -365,7 +368,12 @@ if __name__ == '__main__':
     Path(save_dir).mkdir(parents=True, exist_ok=True)
     wandb_logger = WandbLogger(project=f"byol-{args.dataset}-breakout", save_dir=save_dir, log_model=False)
     # finetune in real-time
-    online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes, name_classes=dm.name_classes)
+
+    if args.old_eval:
+        online_eval = OldSSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes)
+    else:
+        online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes, name_classes=dm.name_classes)
+
     image_viewer = CV2ModelImageSampler()
     # DEFAULTS used by the Trainer
     callbacks = [online_eval]
