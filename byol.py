@@ -311,6 +311,7 @@ if __name__ == '__main__':
         dm.train_transforms = SimCLRTrainDataTransform(args.input_size)
         dm.val_transforms = SimCLREvalDataTransform(args.input_size)
         args.num_classes = dm.num_classes
+        dm.name_classes = ['plane', 'car', 'bird', 'cat', 'deer','dog', 'frog', 'horse', 'ship', 'truck']
         dm.num_channels = 3
 
     elif args.dataset == 'stl10':
@@ -340,7 +341,6 @@ if __name__ == '__main__':
         dm = AtariDataModule(args.filename, train_transforms, val_transforms, None,
                              batch_size=args.batch_size, batches_per_epoch=args.batches_per_epoch)
         dm.num_channels = 6
-        dm.num_classes = 2
         args.num_classes = 2
 
     encoder = None
@@ -365,7 +365,7 @@ if __name__ == '__main__':
     Path(save_dir).mkdir(parents=True, exist_ok=True)
     wandb_logger = WandbLogger(project=f"byol-{args.dataset}-breakout", save_dir=save_dir, log_model=False)
     # finetune in real-time
-    online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes)
+    online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes, name_classes=dm.name_classes)
     image_viewer = CV2ModelImageSampler()
     # DEFAULTS used by the Trainer
     callbacks = [online_eval]

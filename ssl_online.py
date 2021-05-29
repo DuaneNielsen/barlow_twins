@@ -1,4 +1,4 @@
-from typing import Optional, Sequence, Tuple, Union
+from typing import Optional, Sequence, Tuple, Union, List
 
 import torch
 import pytorch_lightning as pl
@@ -37,6 +37,7 @@ class SSLOnlineEvaluator(Callback):  # pragma: no cover
         hidden_dim: Optional[int] = None,
         z_dim: int = None,
         num_classes: int = None,
+        name_classes: List[str] = None,
     ):
         """
         Args:
@@ -54,6 +55,7 @@ class SSLOnlineEvaluator(Callback):  # pragma: no cover
 
         self.z_dim = z_dim
         self.num_classes = num_classes
+        self.name_classes = name_classes
         self.dataset = dataset
 
         self.confusion_matrix = None
@@ -167,7 +169,7 @@ class SSLOnlineEvaluator(Callback):  # pragma: no cover
     def on_validation_epoch_end(self, trainer: 'pl.Trainer', pl_module: 'pl.LightningModule') -> None:
         confusion = self.confusion_matrix.compute()
         confusion = confusion.type(torch.int)
-        confusion_table = wandb.Table(data=confusion.tolist(), columns=['no_reward', 'reward'])
+        confusion_table = wandb.Table(data=confusion.tolist(), columns=self.name_classes)
         pl_module.logger.experiment.log({'confusion': confusion_table})
         table = []
         for image, pred, label in zip(self.images.unbind(0), self.mlp_preds.unbind(0), self.labels.unbind(0)):

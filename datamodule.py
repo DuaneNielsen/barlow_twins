@@ -105,6 +105,22 @@ class AtariDataModule(pl.LightningDataModule):
         self.val_sampler = None
         self.train_sampler = None
 
+    @property
+    def num_classes(self) -> int:
+        """
+        Return:
+            10
+        """
+        return 2
+
+    @property
+    def name_classes(self) -> List[str]:
+        """
+        Return:
+            10
+        """
+        return ['non-reward', 'reward']
+
     def setup(self, stage: Optional[str] = None) -> None:
         self.train_set = H5NextStateReward()
         self.train_set.load(self.filename)
