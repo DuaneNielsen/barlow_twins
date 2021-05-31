@@ -215,7 +215,7 @@ def write_balanced_splits(dataset, dest_filename, class_dict, batch_size, num_ba
     write_samples(train, dataset, class_dict, train_class_index, dataset.image_shape, batch_size, num_batches, compression,
                   compression_opts)
     val = f.create_group('val')
-    write_samples(val, dataset, class_dict, val_class_index, dataset.image_shape, batch_size, num_batches, compression,
+    write_samples(val, dataset, class_dict, val_class_index, dataset.image_shape, batch_size, num_batches//10, compression,
                   compression_opts)
 
 
