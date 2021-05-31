@@ -258,19 +258,14 @@ class BYOL(pl.LightningModule):
         parser.add_argument('--online_ft', action='store_true', help='run online finetuner')
         parser.add_argument('--dataset', type=str, default='cifar10',
                             choices=['cifar10', 'cifar10_upsampled', 'imagenet2012', 'stl10', 'atari'])
-
         (args, _) = parser.parse_known_args()
+
+
 
         # Data
         parser.add_argument('--data_dir', type=str, default='.')
         parser.add_argument('--num_workers', default=8, type=int)
         parser.add_argument('--filename', type=str)
-        reward_class_choices = ['monte_carlo', 'positive_reward', 'distance']
-        parser.add_argument('--reward_class', type=str, default='monte_carlo', choices=reward_class_choices)
-        parser.add_argument('--reward_causality_distance', type=int, default=5)
-        parser.add_argument('--reward_monte_carlo_discount', type=float, default=0.6)
-        parser.add_argument('--reward_threshold', type=float, default=0.5)
-
 
         # optim
         parser.add_argument('--batch_size', type=int, default=256)
@@ -342,7 +337,7 @@ if __name__ == '__main__':
         val_transforms = AtariSimCLREvalDataTransform(input_height=args.input_size)
 
         dm = AtariDataModule(args.filename, train_transforms, val_transforms, None,
-                             batch_size=args.batch_size, batches_per_epoch=args.batches_per_epoch)
+                             batch_size=args.batch_size, batches_per_epoch=args.batches_per_epoch, num_workers=args.num_workers)
         dm.num_channels = 6
         args.num_classes = 2
 
