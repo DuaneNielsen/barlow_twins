@@ -255,14 +255,14 @@ class H5ImageLabelIterableDataset(torch.utils.data.IterableDataset):
             iter_start = start + worker_id * per_worker
             iter_end = min(iter_start + per_worker, end)
 
-        start_t = time()
+        start = time()
         images = g['image'][iter_start:iter_end]
         labels = g['label'][iter_start:iter_end]
-        fetch = time()
+        load = time()
         images = list(zip(*[self.transform(image) for image in images]))
         x = tuple([torch.stack(items) for items in images])
         transform = time()
-        #print(fetch-start_t, transform-fetch)
+        #print(f'start: {iter_start} end:{iter_end} load: {load-start} transform: {transform-load}')
         self.offset += self.batch_size
         if self.offset > len(g['image']):
             raise StopIteration
@@ -272,7 +272,7 @@ class H5ImageLabelIterableDataset(torch.utils.data.IterableDataset):
         # lightning expects this to be the number of batches per epoch
         # for some reason I can't understand
         g = self.f[self.group]
-        return len(g['label'])//self.batch_size
+        return len(g['label']) //16
 
     @property
     def num_classes(self) -> int:
@@ -364,17 +364,36 @@ class AtariDataModule(pl.LightningDataModule):
         self.train_sampler = None
 
         self.train_set = H5ImageLabelIterableDataset(filename, 'train', train_transforms, batch_size=batch_size)
+        #self.train_set = H5ImageLabelDataset(filename, 'train', train_transforms, batch_size=batch_size)
         self.train_set.transforms = self.train_transforms
 
         self.val_set = H5ImageLabelIterableDataset(filename, 'val', val_transforms, batch_size=batch_size)
+        #self.val_set = H5ImageLabelDataset(filename, 'val', val_transforms, batch_size=batch_size)
         self.val_set.transforms = self.val_transforms
+
+
+    def _collate(self, worker_data):
+        xb, yb, zb, labels = [], [], [], []
+        for (x, y, z), l in worker_data:
+            xb.append(x)
+            yb.append(y)
+            zb.append(z)
+            labels.append(l)
+        xb = torch.cat(xb, dim=0)
+        yb = torch.cat(yb, dim=0)
+        zb = torch.cat(zb, dim=0)
+        labels = torch.from_numpy(np.concatenate(labels, axis=0))
+        return (xb, yb, zb), labels
 
     def _data_loader(self, dataset: torch.utils.data.Dataset) -> torch.utils.data.DataLoader:
         return torch.utils.data.DataLoader(
             dataset,
-            batch_size=None,
+            batch_size=self.num_workers,
             num_workers=self.num_workers,
-            pin_memory=self.pin_memory
+            pin_memory=False,
+            shuffle=False,
+            collate_fn=self._collate,
+            prefetch_factor=1,
         )
 
     def train_dataloader(self, *args: Any, **kwargs: Any) -> DataLoader:
