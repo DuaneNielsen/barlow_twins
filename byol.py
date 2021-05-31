@@ -369,7 +369,7 @@ if __name__ == '__main__':
     else:
         online_eval = SSLOnlineEvaluator(dataset=args.dataset, z_dim=2048, num_classes=dm.num_classes, name_classes=dm.name_classes)
 
-    image_viewer = CV2ModelImageSampler()
+    image_viewer = CV2ModelImageSampler(nrow=32)
     # DEFAULTS used by the Trainer
     callbacks = [online_eval]
 
