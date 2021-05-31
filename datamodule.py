@@ -220,7 +220,7 @@ def write_balanced_splits(dataset, dest_filename, class_dict, batch_size, num_ba
 
 
 class H5ImageLabelIterableDataset(torch.utils.data.IterableDataset):
-    def __init__(self, filename, group, transform, batch_size):
+    def __init__(self, filename, group, transform, batch_size, num_workers):
         """
 
         :param filename:
@@ -235,6 +235,7 @@ class H5ImageLabelIterableDataset(torch.utils.data.IterableDataset):
         self.offset = 0
         self.batch_size = batch_size
         self.transform = transform
+        self.num_workers = num_workers
 
     def __iter__(self):
         return self
@@ -269,10 +270,11 @@ class H5ImageLabelIterableDataset(torch.utils.data.IterableDataset):
         return x, labels
 
     def __len__(self):
-        # lightning expects this to be the number of batches per epoch
-        # for some reason I can't understand
+        # because we the batch size in the loader == the number of workers
+        # we must fist multiply be the number of workers then divide by the actual batch size
+        # (yes this is confusing)
         g = self.f[self.group]
-        return len(g['label']) //16
+        return len(g['label']) * self.num_workers // self.batch_size
 
     @property
     def num_classes(self) -> int:
@@ -363,11 +365,11 @@ class AtariDataModule(pl.LightningDataModule):
         self.val_sampler = None
         self.train_sampler = None
 
-        self.train_set = H5ImageLabelIterableDataset(filename, 'train', train_transforms, batch_size=batch_size)
+        self.train_set = H5ImageLabelIterableDataset(filename, 'train', train_transforms, batch_size=batch_size, num_workers=num_workers)
         #self.train_set = H5ImageLabelDataset(filename, 'train', train_transforms, batch_size=batch_size)
         self.train_set.transforms = self.train_transforms
 
-        self.val_set = H5ImageLabelIterableDataset(filename, 'val', val_transforms, batch_size=batch_size)
+        self.val_set = H5ImageLabelIterableDataset(filename, 'val', val_transforms, batch_size=batch_size, num_workers=num_workers)
         #self.val_set = H5ImageLabelDataset(filename, 'val', val_transforms, batch_size=batch_size)
         self.val_set.transforms = self.val_transforms
 
