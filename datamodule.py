@@ -5,7 +5,7 @@ from typing import Union, Optional, Any, List
 import pytorch_lightning as pl
 import torch
 import torch.utils
-from rich.progress import track
+from rich.progress import track, Progress
 from torch.utils.data import DataLoader
 from argparse import ArgumentParser
 
@@ -109,10 +109,13 @@ class PolicyActionLabels(b5.Buffer, torch.utils.data.Dataset, ABC):
         self.image_dtype = None
 
     def build_class_index(self):
-        idx = [[] for _ in range(self.num_classes)]
-        for i in range(self.steps):
-            idx[self.action[i]].append(i)
-        return idx
+        with Progress() as p:
+            task = p.add_task(description='[blue] indexing ...', total=self.steps)
+            idx = [[] for _ in range(self.num_classes)]
+            for i in range(self.steps):
+                idx[self.action[i]].append(i)
+                p.update(task, total=self.steps, advance=1)
+            return idx
 
     def load(self, filename, mode='r', cache_bytes=1073741824, cache_slots=100000, cache_w0=0.0, reward_causality_distance=5):
         super().load(filename, mode, cache_bytes, cache_slots, cache_w0)
@@ -170,52 +173,54 @@ def split_index(class_index):
     return train, val
 
 
-def write_samples(group, dataset, class_dict, class_index, image_shape, batch_size, num_batches, compression,
+def write_samples(group, dataset, class_dict, class_index, image_shape, chunk_size, num_chunks, compression,
                   compression_opts):
 
     sampler = SamplerFactory().get(
         class_idxs=class_index,
-        batch_size=batch_size,
-        n_batches=num_batches,
+        batch_size=chunk_size,
+        n_batches=num_chunks,
         alpha=0.5,
         kind='fixed'
     )
 
-    len = batch_size * num_batches
+    len = chunk_size * num_chunks
 
     group.create_dataset('image',
-                     shape=(len, *dataset.image_shape),
-                     chunks=(batch_size, *dataset.image_shape),
-                     dtype=dataset.image_dtype,
-                     compression=compression,
-                     compression_opts=compression_opts,
-                     shuffle=False
-                     )
+                         shape=(len, *dataset.image_shape),
+                         chunks=(chunk_size, *dataset.image_shape),
+                         dtype=dataset.image_dtype,
+                         compression=compression,
+                         compression_opts=compression_opts,
+                         shuffle=False
+                         )
     group.create_dataset('label',
-                     shape=(len,),
-                     chunks=(batch_size,),
-                     dtype=h5.enum_dtype(class_dict, basetype=np.int64),
-                     compression=compression,
-                     compression_opts=compression_opts,
-                     shuffle=False
-                     )
+                         shape=(len,),
+                         chunks=(chunk_size,),
+                         dtype=h5.enum_dtype(class_dict, basetype=np.int64),
+                         compression=compression,
+                         compression_opts=compression_opts,
+                         shuffle=False
+                         )
 
-    for i, (image, cls) in track(enumerate(DataLoader(dataset, batch_sampler=sampler, num_workers=0)),
-                                 total=num_batches, description=f'[red] writing {group.name}'):
-        offset = i * batch_size
-        group['image'][offset:offset + batch_size] = image.numpy()
-        group['label'][offset:offset + batch_size] = cls.numpy()
+    with Progress() as p:
+        task = p.add_task(description=f'[red] writing {group.name}', total=num_chunks)
+        for i, (image, cls) in enumerate(DataLoader(dataset, batch_sampler=sampler, num_workers=0)):
+            offset = i * chunk_size
+            group['image'][offset:offset + chunk_size] = image.numpy()
+            group['label'][offset:offset + chunk_size] = cls.numpy()
+            p.update(task, total=num_chunks, advance=1)
 
 
-def write_balanced_splits(dataset, dest_filename, class_dict, batch_size, num_batches, compression, compression_opts):
+def write_balanced_splits(dataset, dest_filename, class_dict, chunk_size, num_chunks, compression, compression_opts):
 
     train_class_index, val_class_index = split_index(dataset.class_index)
     f = h5.File(dest_filename, mode='w')
     train = f.create_group('train')
-    write_samples(train, dataset, class_dict, train_class_index, dataset.image_shape, batch_size, num_batches, compression,
+    write_samples(train, dataset, class_dict, train_class_index, dataset.image_shape, chunk_size, num_chunks, compression,
                   compression_opts)
     val = f.create_group('val')
-    write_samples(val, dataset, class_dict, val_class_index, dataset.image_shape, batch_size, num_batches//10, compression,
+    write_samples(val, dataset, class_dict, val_class_index, dataset.image_shape, chunk_size, num_chunks // 10, compression,
                   compression_opts)
 
 
@@ -426,8 +431,7 @@ class AtariDataModule(pl.LightningDataModule):
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('--source_filename', required=True)
-    parser.add_argument('--batch_size', required=True, type=int)
-    parser.add_argument('--num_batches', required=True, type=int)
+    parser.add_argument('--chunk_size', required=True, type=int)
     parser.add_argument('--dest_filename', required=True)
     parser.add_argument('--compression_opts', type=int, default=6)
     parser.add_argument('--dataset', choices=['reward', 'action'], required=True)
@@ -449,6 +453,7 @@ if __name__ == '__main__':
         raise Exception
 
     class_dict = dict(zip(ds.name_classes, range(len(ds.name_classes))))
+    num_chunks = len(ds) // args.chunk_size
     write_balanced_splits(ds, dest_filename=args.dest_filename, class_dict=class_dict,
-                          batch_size=args.batch_size, num_batches=args.num_batches,
+                          chunk_size=args.chunk_size, num_chunks=num_chunks,
                           compression='gzip', compression_opts=args.compression_opts)
