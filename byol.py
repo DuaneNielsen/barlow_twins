@@ -339,11 +339,15 @@ if __name__ == '__main__':
         dm = AtariDataModule(args.filename, train_transforms, val_transforms, None,
                              batch_size=args.batch_size, batches_per_epoch=args.batches_per_epoch, num_workers=args.num_workers)
         dm.num_channels = 6
-        args.num_classes = 2
+        args.num_classes = dm.num_classes
 
     encoder = None
     if args.vision_model == 'atari':
         encoder = AtariVision()
+        encoder.conv_stem = nn.Sequential(
+            nn.Conv2d(dm.num_channels, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.SELU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2))
     elif args.vision_model == 'resnet-50':
         #encoder = torchvision_ssl_encoder('resnet50')
         encoder = FixNineYearOldCodersJunk(encoder)
